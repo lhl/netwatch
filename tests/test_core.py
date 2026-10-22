@@ -58,6 +58,35 @@ class CoreTests(unittest.TestCase):
             with self.subTest(value=type(value)), self.assertRaises(ValidationError):
                 canonical(value)
 
+    def test_tree_budget_stops_wide_iterators_incrementally(self):
+        from autoprotect.core import _check_tree
+
+        class GuardedList(list):
+            def __iter__(self):
+                for index in range(100):
+                    if index >= 10:
+                        raise AssertionError("validation expanded the whole list before enforcing the budget")
+                    yield None
+
+        class GuardedDict(dict):
+            def items(self):
+                for index in range(100):
+                    if index >= 10:
+                        raise AssertionError("validation expanded the whole object before enforcing the budget")
+                    yield str(index), None
+
+        for value in (GuardedList(), GuardedDict()):
+            with self.subTest(value=type(value)), self.assertRaisesRegex(ValidationError, "node limit"):
+                _check_tree(value, max_nodes=4, max_depth=32)
+
+    def test_tree_depth_and_node_limits_preserve_key_counting(self):
+        self.assertEqual(load_json('{"key":0}', max_nodes=3, max_depth=1), {"key": 0})
+        for kwargs in ({"max_nodes": 2}, {"max_depth": 0}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValidationError):
+                load_json('{"key":0}', **kwargs)
+        self.assertEqual(load_json('[]', max_nodes=1, max_depth=0), [])
+        self.assertEqual(load_json('{}', max_nodes=1, max_depth=0), {})
+
     def test_identifiers_and_packages(self):
         self.assertEqual(identifier("host-abc:amd64"), "host-abc:amd64")
         self.assertEqual(package_name("libstdc++6"), "libstdc++6")
@@ -74,6 +103,13 @@ class CoreTests(unittest.TestCase):
         for value in ("-1", "1;id", "1\n", "x:1", "1-", "1-2:3", "v1", "1_2", "1/2"):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 version(value)
+
+    def test_debian_epoch_native_bounds(self):
+        for epoch in ("2147483647", "0002147483647"):
+            self.assertEqual(version(epoch + ":1"), epoch + ":1")
+        for epoch in ("2147483648", "0002147483648", "9" * 100):
+            with self.subTest(epoch=epoch), self.assertRaises(ValidationError):
+                version(epoch + ":1")
 
     def test_strict_integers_and_text(self):
         self.assertEqual(integer(1, minimum=1, maximum=2), 1)

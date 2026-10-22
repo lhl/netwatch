@@ -84,8 +84,8 @@ def version(value: Any, field: str = "version") -> str:
     body = value
     if ":" in value:
         epoch, body = value.split(":", 1)
-        if not re.fullmatch(r"[0-9]+", epoch, flags=re.ASCII):
-            raise ValidationError(f"{field} has an invalid Debian epoch")
+        if not re.fullmatch(r"[0-9]+", epoch, flags=re.ASCII) or int(epoch) > 2**31 - 1:
+            raise ValidationError(f"{field} has an invalid or out-of-range Debian epoch")
     upstream, separator, revision = body.rpartition("-")
     if not separator:
         upstream = body
@@ -97,12 +97,25 @@ def version(value: Any, field: str = "version") -> str:
 
 
 def _check_tree(value: Any, *, max_nodes: int, max_depth: int) -> None:
-    stack = [(value, 0)]
+    # Keep only one iterator per nesting level. Expanding a wide container into
+    # (child, depth) tuples can exhaust memory before its node limit is checked.
+    def object_children(mapping):
+        for key, child in mapping.items():
+            if not isinstance(key, str):
+                raise ValidationError("JSON object keys must be strings")
+            yield key
+            yield child
+
+    stack = [iter((value,))]
     visited = 0
     while stack:
-        item, depth = stack.pop()
+        try:
+            item = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
         visited += 1
-        if visited > max_nodes or depth > max_depth:
+        if visited > max_nodes or len(stack) - 1 > max_depth:
             raise ValidationError("JSON exceeds the nesting or node limit")
         if item is None or type(item) in (bool, int):
             continue
@@ -113,13 +126,9 @@ def _check_tree(value: Any, *, max_nodes: int, max_depth: int) -> None:
             if not math.isfinite(item):
                 raise ValidationError("JSON numbers must be finite")
         elif isinstance(item, dict):
-            for key, child in item.items():
-                if not isinstance(key, str):
-                    raise ValidationError("JSON object keys must be strings")
-                stack.append((key, depth + 1))
-                stack.append((child, depth + 1))
+            stack.append(iter(object_children(item)))
         elif isinstance(item, list):
-            stack.extend((child, depth + 1) for child in item)
+            stack.append(iter(item))
         else:
             raise ValidationError("Value is not a supported JSON type")
 

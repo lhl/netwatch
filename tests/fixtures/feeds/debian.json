@@ -1,0 +1,45 @@
+{
+  "example-source": {
+    "CVE-2026-10001": {
+      "description": "Synthetic description with control \u001b and command $(never-execute).",
+      "scope": "remote",
+      "debianbug": 123456,
+      "releases": {
+        "bookworm": {"status": "resolved", "fixed_version": "1.0-1+deb12u9", "urgency": "high"},
+        "trixie": {
+          "status": "resolved",
+          "fixed_version": "1:1.0-1+deb13u2",
+          "urgency": "high",
+          "repositories": {"trixie": "1:1.0-1+deb13u1", "trixie-security": "1:1.0-1+deb13u2"}
+        },
+        "sid": {"status": "resolved", "fixed_version": "2.0-1", "urgency": "high"}
+      }
+    },
+    "CVE-2026-10002": {
+      "description": "Not affected marker, not a version to install",
+      "releases": {"trixie": {"status": "resolved", "fixed_version": "0", "urgency": "unimportant"}}
+    },
+    "CVE-2026-10003": {
+      "description": "An open issue with no immediate advisory",
+      "releases": {"trixie": {"status": "open", "urgency": "low", "nodsa": "Minor issue", "nodsa_reason": "ignored", "repositories": {"trixie": "1:1.0-1"}}}
+    },
+    "CVE-2026-10004": {
+      "description": "Future status remains unresolved",
+      "releases": {"trixie": {"status": "future-state", "urgency": "not-yet-assessed"}}
+    },
+    "TEMP-0000000-ABCDEF": {
+      "description": "Synthetic temporary Debian identifier, not a CVE",
+      "releases": {"trixie": {"status": "resolved", "fixed_version": "0", "urgency": "unimportant"}}
+    },
+    "CVE-2026-10005": {
+      "description": "No release assertion is not proof of safety",
+      "releases": {"sid": {"status": "resolved", "fixed_version": "3.0-1", "urgency": "medium"}}
+    }
+  },
+  "another-source": {
+    "CVE-2026-10001": {
+      "description": "A different source package can share a CVE",
+      "releases": {"trixie": {"status": "undetermined", "urgency": "not yet assigned"}}
+    }
+  }
+}

@@ -32,9 +32,9 @@ This checklist tracks the original assignment: research security feeds and patch
 
 - [ ] Provide installable project metadata and a documented CLI.
 - [ ] Persist feeds, normalized incidents or advisories, inventories, findings, plans, approvals, execution results, and audit events as appropriate to the implemented design.
-- [ ] Ingest pwn.watch data and at least one authoritative applicability source with bounded network requests and deterministic offline fixtures.
-- [ ] Import system inventories and implement a read-only local collector. Keep unsupported ecosystems and uncertain matches visible rather than declaring them safe.
-- [ ] Implement evidence-based applicability triage and risk ranking. Feed text cannot supply commands or silently select patch targets.
+- [x] Ingest pwn.watch data and at least one authoritative applicability source with bounded network requests and deterministic offline fixtures. Python acquisition/parser APIs are verified; durable source health and CLI integration remain below.
+- [x] Import system inventories and implement a read-only local collector. Keep unsupported ecosystems and uncertain matches visible rather than declaring them safe. Native collection is checked with synthetic identity files and fake dpkg output; no private host inventory was taken.
+- [x] Implement evidence-based applicability triage and risk ranking. Feed text cannot supply commands or silently select patch targets. Public parser-to-matcher tests and 1,028 native dpkg comparison cases pass.
 - [ ] Build a remediation queue with validated, structured plans, explicit manual approval, policy-controlled automation, and revalidation before execution.
 - [ ] Provide a runnable end-to-end simulation that changes only disposable fixture state and demonstrates successful verification and failed-update handling.
 - [ ] Implement a narrowly scoped real remediation backend with deterministic fake-runner tests of command construction, authorization, preconditions, execution, and verification. An unavailable implementation prerequisite is a blocker, not completion. Never run live patching during development; disclose live execution as untested.
