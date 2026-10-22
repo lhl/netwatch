@@ -52,6 +52,14 @@ Focused independent re-reviews confirmed closure without further findings. The f
 
 CLI/demo verification is a later delivery gate, not replaced by helper/API tests.
 
+## Packaging and protected local files
+
+`pyproject.toml` defines a standard-library package for Python 3.12, with a pinned build backend. An offline temporary snapshot of the stable intake modules and `local_files.py` built both a wheel and source distribution. The wheel installed without dependencies in a fresh temporary virtual environment; isolated imports, version and the public pwn parser passed. Console commands and final integrated packaging remain later gates.
+
+`local_files.py` validates bounded regular-file imports and private policy/SQLite paths. Independent review found that early `abspath` normalization removed `..` and skipped canceled ancestors. Red-first regressions reproduced four invalid-ancestor cases. The repair preserves parent components until descriptor-relative validation and normalizes returned state paths afterward. All **17 focused tests passed**. Independent re-review closed the finding with five additional temporary-directory tests covering both APIs, relative/absolute paths, valid multiple-parent traversal and rejection without creating state at either possible location.
+
+Ownership variants were checked with synthetic metadata, not cross-user privileged execution. The invoking user and root remain trusted; checks detect observed changes during reads but do not claim atomic snapshots against those owners. These verified helpers do not establish that the pending CLI reloads policy or protects its state correctly.
+
 ## Limits and remaining gates
 
 - Feed parsing still decodes the whole JSON snapshot before structural validation. Input byte limits do not establish a hard parser-memory limit.

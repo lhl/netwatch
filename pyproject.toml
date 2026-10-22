@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoprotect"
+version = "0.1.0"
+description = "Local security-advisory triage and policy-authorized remediation"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[tool.setuptools]
+packages = ["autoprotect"]
