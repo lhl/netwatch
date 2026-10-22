@@ -47,15 +47,15 @@ This checklist tracks the original assignment: research security feeds and patch
 - [x] Exercise hostile feed content, malformed payloads, source spoofing, unsupported version comparisons, duplicate ingestion, stale inventory and approvals, denied policy, command injection, concurrent execution, and failure/rollback behavior as applicable. Evidence and honest recovery limits are recorded in `docs/REVIEW.md`.
 - [x] Independently review security boundaries and correctness with `astra-xhigh`; record findings, fixes, and unresolved limitations. All implementation findings are closed; real privileged deployment remains untested.
 - [x] Re-run affected checks after fixes and perform an integration review of all delegated changes. Parent suite/demo/package checks and original-reviewer rechecks pass; reviewed candidate hashes match.
-- [ ] Inspect final changes for secrets, accidental state, unintended sibling edits, and unsupported claims.
+- [x] Inspect final changes for secrets, accidental state, unintended sibling edits, and unsupported claims. Parent reviewed tracked/proposed paths and content, scanned private-key markers and state/build/cache extensions, preserved ignored session state, and verified disjoint repository-only edits. Final independent documentation audit found no actionable claims or command defects.
 
 ## Operator documentation and handoff
 
-- [ ] Write `README.md` with verified installation, demo, feed polling, inventory, triage, queue, approval, execution, and test commands.
-- [ ] Write `docs/OPERATIONS.md` with rollout, recovery, approval boundaries, scheduling, and production-readiness gates.
-- [ ] Clearly disclose network-dependent checks and privileged execution not tested here.
-- [ ] Reconcile this checklist against evidence and report delivered files, passing checks, and remaining limitations.
-- [ ] Final external action: none. Live deployment, privileged patching, and fleet enrollment require separately supplied targets and operational authorization.
+- [x] Write `README.md` with verified installation, demo, feed polling, inventory, triage, queue, approval, execution, and test commands. README metadata build/install check passed after the final edit; live polling is explicitly distinguished from offline verification.
+- [x] Write `docs/OPERATIONS.md` with rollout, recovery, approval boundaries, scheduling, and production-readiness gates. Commands/fields match implementation; parent and independent link/syntax/help audits pass. Native procedures are conditional, not deployment evidence.
+- [x] Clearly disclose network-dependent checks and privileged execution not tested here. README, OPERATIONS and REVIEW distinguish dated research retrievals and offline injected transports from untested real APT/download/lock/install and native trust provisioning.
+- [x] Reconcile this checklist against evidence and report delivered files, passing checks, and remaining limitations. `docs/REVIEW.md` and the final delivery worklog record the complete 452-test, module/installed 101-command and independent-review evidence.
+- [x] Final external action: none. No push, publication, live deployment, privileged patching or fleet enrollment was performed; those require separately supplied targets and operational authorization.
 
 ## Context for implementation
 

@@ -2,7 +2,7 @@
 
 ## Scope and completion status
 
-This record covers the reviewed design, intake, protected-file and backend/lifecycle APIs, packaged CLI and disposable command demo. Those implementation units are accepted after repair re-reviews. Final documentation and the delivery audit remain open in [DELIVERY.md](DELIVERY.md). Earlier sections retain the evidence and scope at each milestone.
+This record covers the reviewed local proof of concept: source research, design, intake, protected-file and backend/lifecycle APIs, packaged CLI, disposable command demo and operator documentation. All implementation findings are resolved and independently re-reviewed; the final documentation audit found no actionable issues. [DELIVERY.md](DELIVERY.md) records the completed scope. Earlier sections retain the evidence and scope at each milestone. This acceptance does not qualify real privileged deployment.
 
 Reviewers used the configured `astra-xhigh` role with separate review assignments. They did not edit the candidates. Parent integration inspected delegated files, added regression tests and ran the integrated offline suite. Review findings and exact unit handoffs are retained under `worklog/entries/`.
 
@@ -98,7 +98,7 @@ The lifecycle reviewer additionally observed one winning claim across four proce
 
 ## CLI and disposable command candidate
 
-The command unit adds `cli.py`, the multiprocessing-safe `__main__.py`, `demo.py`, console metadata, synthetic examples and `scripts/check_package.py`. Separate CLI and demo/package reviews and their repair re-reviews are complete. Final operator documentation remains open. The initial results below precede the repaired candidate's acceptance.
+The command unit adds `cli.py`, the multiprocessing-safe `__main__.py`, `demo.py`, console metadata, synthetic examples and `scripts/check_package.py`. Separate CLI and demo/package reviews and their repair re-reviews are complete. Final operator documentation was verified in the final audit below. The initial results below precede the repaired candidate's acceptance.
 
 Parent inspected both handoffs and ran:
 
@@ -153,7 +153,17 @@ The demo/package re-review closed both findings without new defects. It independ
 
 Parent compared all six reviewed CLI/demo/package implementation and test file hashes to the independent reviewers' hashes; all matched. The 452-test suite and installed/direct demo evidence therefore apply to the accepted command candidate. Final documentation review is separate from these completed code reviews.
 
-## Limits and remaining gates
+## Final documentation and delivery audit
+
+The implementation was committed as `213a423`. Final integration added `README.md`, `docs/OPERATIONS.md` and README package metadata without changing runtime or tests. The existing 452-test result therefore remains the final runtime evidence. After the metadata change, `PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_package.py` again passed offline wheel/source builds, fresh installation, both entrypoints and the installed 101-command demo, including temporary-state cleanup.
+
+Parent inspected the operations handoff and verified 32 local Markdown links/anchors and 24 Bash blocks across the seven product/design/delivery documents; shell templates were parsed, not executed. Tracked/proposed file inspection found no local database/build/cache artifacts or private-key markers; public signature fixtures and synthetic examples are intentional. Existing ignored session state and caches were preserved. Sibling repositories were read-only references.
+
+The final independent `astra-xhigh` audit accepted the README and runbook with no actionable findings or unassigned in-scope deliverables. It checked 23 local links/anchors, parsed 19 Bash blocks, and ran 17 safe invocations: version, top-level help and all 15 command helps. Code/test inspection checked policy, protected paths, provenance, command exits, native restrictions, coordination and recovery fields. It verified installation claims against metadata/checker code and confirmed documentation hashes remained unchanged. It did not repeat the parent suite, demos or builds and performed no native or network operation.
+
+The delivery checklist is complete for this proof of concept. Native qualification remains separate: a reviewed configuration-fingerprint provisioning procedure, authorized disposable-Debian testing of real APT/download/lock/install/recovery, application-specific health checks and production controls are not delivered evidence.
+
+## Limits and deployment gates
 
 - Feed parsing still decodes the whole JSON snapshot before structural validation. Input byte limits do not establish a hard parser-memory limit.
 - Trailer validation depends on a private CPython response hook tested on Python 3.12. Other supported runtimes need the real-response regressions. Chunk grammar remains the standard library's responsibility; there is no aggregate wire-byte cap on chunk overhead.
@@ -161,4 +171,4 @@ Parent compared all six reviewed CLI/demo/package implementation and test file h
 - Runner execution/output limits do not forcibly bound native spawn/exec handshake time. Graceful SIGINT cleanup is not crash containment, and process groups do not contain deliberately detached descendants. Other custom raising signal handlers are not guarded during native spawn. Any uncertain mutation must retain the lifecycle's recovery gate.
 - No private development-host inventory, privileged package update, real APT repository resolution/download, native dpkg frontend-lock handoff or installed-state verification was performed. Native collection tests use synthetic files and fake dpkg output; lock/cleanup tests use temporary files and synthetic Python subprocesses.
 - Fixed-source HTTPS acquisition alone is not durable provenance. The reviewed Engine/Store records acquisition and health separately from imported body claims; CLI provenance regressions preserve that boundary.
-- Final acceptance still requires the documentation and delivery audit. Packaged user-facing commands, disposable end-to-end demo and integrated code reviews are complete.
+- The local proof-of-concept delivery is complete. Production scheduling, fleet enrollment, authenticated operators, externally protected audit, native fingerprint provisioning and real privileged qualification remain separate deployment work.
