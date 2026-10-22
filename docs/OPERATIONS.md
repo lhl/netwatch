@@ -226,7 +226,7 @@ The recovery commands below are conditional native templates with the same root/
      --policy "$policy_file" --live recover "$plan_id"
    ```
 
-   This records `needs_attention` with `result.verified=false` and **retains** the gate. It neither retries installation nor declares success. It is only for `executing`; pending/approved gates, final outcomes and malformed gates need the explicit resolution path after investigation.
+   For an `executing` plan this records `needs_attention` with `result.verified=false` and **retains** the gate. It neither retries installation nor declares success. For a `pending` or `approved` plan whose own gate is retained, the claim never committed and mutation never started (installation begins only after the `executing` claim commits). `recover` then records `failed` with `verified=false`, rotates the target generation and clears the gate in one step; collect again before planning. Final outcomes and malformed gates need the explicit resolution path after investigation.
 4. Inspect and repair the package/application state using the separately authorized asset-specific recovery procedure. Preserve evidence. Autoprotect has no rollback command and does not automatically downgrade or repair dpkg. Recovery may require restoring data/configuration or replacing the host, not another package operation.
 5. Resolve the retained gate only after that investigation and recovery decision. `recovery_reason` must be a nonempty printable ASCII explanation, at most 2,048 characters, without surrounding whitespace or secrets:
 
@@ -236,14 +236,14 @@ The recovery commands below are conditional native templates with the same root/
      --actor "$actor_label" --reason "$recovery_reason"
    ```
 
-   Require `gate_cleared=true` and a changed `target_generation` in the successful result. `verified=false` is intentional: this records an operator attestation, never a new successful-remediation verdict. Nonfinal work becomes `needs_attention`; existing final outcomes are not upgraded to success.
+   Require `gate_cleared=true` and a changed `target_generation` in the successful result. `verified=false` is intentional: this records an operator attestation, never a new successful-remediation verdict. With a verified gate, nonfinal work becomes `needs_attention`; with a malformed gate only an `executing` plan does, because the gate cannot identify which pending plan, if any, it belonged to. Existing final outcomes are not upgraded to success.
 6. Check queue/audit and recovery status again. Collect actual backend inventory, triage and create a new plan; manual mode needs a new approval. Resolution rotates the target-wide generation **before** removing the gate, invalidating all pre-resolution collection contexts and plans across databases, even in the same clock second. An import cannot supply the required fresh collection context. Old queue rows in another database need not change immediately, but cannot gain authority from their old approval.
 
 ### Match the evidence, not just the command name
 
 | `gate` evidence | Permitted handling |
 | --- | --- |
-| `{"plan_id": "ID"}` matching the selected plan | `prior_plan_identity_verified=true`. Use `recover` only for abandoned `executing` work, then explicit resolution after inspection. A gate can also remain with a pending/approved/final plan; resolve it explicitly without inventing an execution result. |
+| `{"plan_id": "ID"}` matching the selected plan | `prior_plan_identity_verified=true`. Use `recover` for abandoned `executing` work, then explicit resolution after inspection. With a pending/approved plan, `recover` records the never-committed claim as `failed` and clears the gate. A gate left with a final plan needs explicit resolution without inventing an execution result. If recording a claim fails before commit, `execute` withdraws its own new gate immediately. |
 | Valid gate for a different plan | Stop. Locate the matching plan and its database. An override cannot clear another valid plan's gate. There is no CLI recovery without a stored plan; missing owning state requires external recovery investigation. |
 | `null` | No unresolved gate was found. Neither `recover` nor resolution can fabricate one or finalize a plan through it. Investigate any disagreement with queue/audit; do not manufacture a gate. |
 | `{"malformed": true, "digest": "RAW_SHA256"}` | A bounded regular gate was readable but its contents were invalid. Prior-plan identity is unverified. Investigate the relevant stored plan/asset and explicitly attest this exact evidence using the procedure below. |
@@ -286,6 +286,8 @@ Evidence retention is automatic. Replacing a source head or recording triage del
 Content hashes and append-only audit rows help bind actions and detect corruption, but a trusted database writer can subvert them. There is no externally immutable audit sink, backup/restore command, compaction service or tamper-proof approval identity. Establish a separately tested backup/restore procedure before native rollout. Preserve the database, policy and target coordination evidence together; do not restore an old database or generation token and assume old approvals remain usable. A restored system must be reconciled with actual package state before fresh collection/planning.
 
 The runner uses fixed executable paths, argument arrays, a minimal environment and process groups, not shell interpolation. Default combined output is capped at 16 MiB. Native probe/transaction commands have 120-second deadlines, download preparation 300 seconds and installation 900 seconds; these are per-operation bounds, not a total plan deadline. Freshness/approval checks run again before installation. A socket-operation limit of 10 seconds and a 60-second worker deadline bound feed acquisition after worker startup. See [acquisition limits](DESIGN.md#acquisition-and-source-health) and [runner limitations](DESIGN.md#debian-aptdpkg).
+
+After a command exits, the runner waits at most one second for descendants that inherited its output pipes, then completes. It kills remaining descendants in the command's process group, except after a successful exit of the native `dpkg --install`, so services started by maintainer scripts keep running (they lose the inherited output pipes). Timeouts, output overflow, interrupts and errors always kill the group.
 
 Native spawn/exec startup itself is not forcibly time-bounded. Cleanup depends on Python unwinding and working OS controls; SIGKILL, host/interpreter crashes, some custom signal handlers or deliberately detached descendants can escape it. External supervision is needed for a hard wall-clock limit. Expiring a supervisor timer must trigger uncertainty handling, not automatic replay.
 

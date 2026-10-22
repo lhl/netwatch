@@ -207,7 +207,7 @@ class RuntimePipelineTests(unittest.TestCase):
                                               malformed_digest=expected_digest)
         self.assertTrue(result["gate_cleared"])
         self.assertFalse(result["verified"])
-        self.assertEqual(result["status"], "needs_attention")
+        self.assertEqual(result["status"], "approved")  # Never executing; rotation makes it stale.
         self.assertNotEqual(before, self.simulator.generation())
         self.assertFalse(self.simulator._gate_path.exists())
 

@@ -153,6 +153,13 @@ class SyntheticBackend:
         if self.on_begin:
             self.on_begin()
 
+    def cancel(self, plan_id):
+        assert self.locked and not self.recovery and "apply" not in self.calls
+        assert load_json(self.gate.read_bytes())["plan_id"] == plan_id
+        self.gate.unlink()
+        self._flush_directory()
+        self.calls.append("cancel")
+
     def finish(self, plan_id, outcome):
         assert self.locked
         assert load_json(self.gate.read_bytes())["plan_id"] == plan_id
@@ -788,20 +795,52 @@ class EngineTests(unittest.TestCase):
         self.backend.after_callback = attempt_changes
         self.assertEqual(self.engine.execute(plan["id"])["status"], "succeeded")
 
-    def test_claim_commit_failure_retains_gate_even_when_status_rolls_back(self):
+    def test_claim_recording_failure_before_commit_withdraws_the_new_gate(self):
+        for fault in (sqlite3.OperationalError("Synthetic claim persistence fault"), KeyboardInterrupt()):
+            with self.subTest(fault=type(fault).__name__):
+                plan = self.prepare()
+                original = self.store.claim
+                def fail(*args, **kwargs):
+                    original(*args, **kwargs)
+                    raise fault
+                self.backend.calls.clear()
+                with patch.object(self.store, "claim", side_effect=fail), \
+                        self.assertRaises((IndeterminateError, KeyboardInterrupt)):
+                    self.engine.execute(plan["id"])
+                # The claim rolled back before commit, so no mutation could start.
+                self.assertFalse(self.backend.gate.exists())
+                self.assertIn("cancel", self.backend.calls)
+                self.assertNotIn("apply", self.backend.calls)
+                self.assertEqual(self.store.plan(plan["id"])["status"], "approved")
+                self.assertEqual(self.engine.execute(plan["id"])["status"], "succeeded")
+                self.backend.path.write_text(canonical(inventory()))
+                self.at += 1
+
+    def test_recover_finalizes_and_clears_a_gate_whose_claim_never_committed(self):
         plan = self.prepare()
-        original = self.store.claim
-        def fail(*args, **kwargs):
-            original(*args, **kwargs)
-            raise sqlite3.OperationalError("Synthetic claim persistence fault")
-        with patch.object(self.store, "claim", side_effect=fail), self.assertRaises(IndeterminateError):
+        def interrupt():
+            raise KeyboardInterrupt
+        self.backend.on_begin = interrupt
+        with self.assertRaises(KeyboardInterrupt):
             self.engine.execute(plan["id"])
+        self.backend.on_begin = None
         self.assertTrue(self.backend.gate.exists())
         self.assertEqual(self.store.plan(plan["id"])["status"], "approved")
-        self.assertNotIn("apply", self.backend.calls)
-        resolved = self.engine.resolve_recovery(plan["id"], "op", "Verified no installation began; private fixture only")
-        self.assertEqual(resolved["status"], "needs_attention")
+        before = self.backend.generation()
+        result = self.engine.recover(plan["id"])
+        self.assertEqual(result["status"], "failed")
+        self.assertFalse(result["result"]["verified"])
+        self.assertIn("never committed", result["result"]["reason"])
         self.assertFalse(self.backend.gate.exists())
+        self.assertNotEqual(self.backend.generation(), before)
+        self.assertNotIn("apply", self.backend.calls)
+        events = [row["event"] for row in self.engine.audit()]
+        self.assertLess(events.index("execution-recovered"), events.index("recovery-gate-cleared"))
+        # Generation rotation forces fresh collection before any new plan.
+        finding = next(row for row in self.engine.triage("fixture-host") if row["status"] == "affected")
+        with self.assertRaisesRegex(PolicyError, "generation"):
+            self.engine.plan(finding["id"])
+        self.assertEqual(self.prepare()["status"], "approved")
 
     def test_outcome_persistence_failure_retains_executing_and_gate(self):
         plan = self.prepare()
@@ -1284,11 +1323,25 @@ class EngineTests(unittest.TestCase):
                                                malformed_digest=expected["digest"])
         self.assertFalse(resolved["prior_plan_identity_verified"])
         self.assertFalse(resolved["verified"])
-        self.assertEqual(resolved["status"], "needs_attention")
+        # An unidentifiable gate cannot finalize a plan that never executed.
+        self.assertEqual(resolved["status"], "approved")
+        self.assertIsNone(self.store.outcome(plan["id"]))
         self.assertNotEqual(resolved["target_generation"], "0" * 64)
         attestation = next(row for row in self.engine.audit() if row["event"] == "recovery-resolution-requested")
         self.assertFalse(attestation["details"]["prior_plan_identity_verified"])
         self.assertEqual(attestation["details"]["gate"], expected)
+
+    def test_malformed_gate_resolution_finalizes_only_an_executing_plan(self):
+        plan = self.prepare()
+        with self.store.transaction():
+            self.store.claim(plan["id"], self.at, expected=("approved",))
+        self.backend.gate.write_bytes(b"partial")
+        digest_value = hashlib.sha256(b"partial").hexdigest()
+        resolved = self.engine.resolve_recovery(plan["id"], "operator", "Inspected abandoned malformed gate",
+                                               malformed_digest=digest_value)
+        self.assertEqual(resolved["status"], "needs_attention")
+        self.assertFalse(resolved["prior_plan_identity_verified"])
+        self.assertFalse(self.backend.gate.exists())
 
     def test_review_valid_gate_never_accepts_a_malformed_override(self):
         first = self.prepare()

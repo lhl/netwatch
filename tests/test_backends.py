@@ -277,6 +277,31 @@ class SimulatorTests(unittest.TestCase):
             self.backend.clear_gate(PLAN, "Complete two-link publication inspected")
         self.assertFalse(temporary.exists())
 
+    def test_cancel_withdraws_only_an_unapplied_gate_from_this_lock(self):
+        with self.backend.lock("synthetic-host"):
+            with self.assertRaises(BackendError):
+                self.backend.cancel(PLAN)  # Nothing was begun under this lock.
+            self.backend.begin(PLAN)
+            with self.assertRaises(BackendError):
+                self.backend.cancel("b" * 64)
+            self.backend.cancel(PLAN)
+            self.assertFalse(self.backend._gate_path.exists())
+        with self.backend.lock("synthetic-host"):
+            self.backend.begin(PLAN)
+            state = self.backend._state()
+            state["failure_mode"] = "before_write"
+            backends._atomic_json(self.path, state)
+            with self.assertRaises(BackendError):
+                self.backend.apply(target(), policy(), before_mutation=lambda: None)
+            with self.assertRaisesRegex(BackendError, "unapplied"):
+                self.backend.cancel(PLAN)  # apply() was entered: only outcome or recovery may clear it.
+            self.assertTrue(self.backend._gate_path.exists())
+            self.backend.finish(PLAN, "failed")
+        with self.backend.lock("synthetic-host"):
+            pass
+        with self.assertRaises(BackendError):
+            self.backend.cancel(PLAN)  # The lock is required.
+
     def test_gate_publication_cannot_overwrite_and_failed_fsync_cannot_authorize(self):
         with self.backend.lock("synthetic-host"):
             self.backend.begin(PLAN)
@@ -721,8 +746,10 @@ class FakeNativeRunner:
             self.events.append("unlock")
             self.frontend = False
 
-    def run(self, argv, *, timeout=60, cwd=None):
+    def run(self, argv, *, timeout=60, cwd=None, keep_descendants=False):
         self.commands.append((list(argv), timeout, cwd, self.frontend))
+        # Only the installation may leave maintainer-script services running.
+        assert keep_descendants is (argv[0] == "/usr/bin/dpkg" and "--install" in argv), argv
         if argv[0] == "/usr/bin/python3":
             action = argv[3]
             self.events.append(action)

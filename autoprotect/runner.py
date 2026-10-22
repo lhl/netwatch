@@ -22,6 +22,9 @@ import time
 from .core import BackendError, IndeterminateError, ValidationError, integer
 
 _FRONTEND_LOCK_PATH = "/var/lib/dpkg/lock-frontend"
+# After the command itself exits, wait at most this long for descendants that
+# inherited its output pipes before treating the output as complete.
+_PIPE_GRACE = 1.0
 # POSIX record locks are process-wide: opening and closing a second descriptor
 # for the same inode could drop the first lock. Never enter a second context.
 _FRONTEND_GUARD = threading.Lock()
@@ -88,9 +91,9 @@ class _CommandProcess(subprocess.Popen):
     def start(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def stop(self):
+    def stop(self, *, kill=True):
         try:
-            if self.pid is not None:
+            if self.pid is not None and kill:
                 try:
                     # Include descendants even when their leader already exited.
                     os.killpg(self.pid, signal.SIGKILL)
@@ -215,8 +218,15 @@ class Runner:
             environment["DPKG_FRONTEND_LOCKED"] = "true"
         return environment
 
-    def run(self, argv, *, timeout=60, cwd=None) -> CommandResult:
+    def run(self, argv, *, timeout=60, cwd=None, keep_descendants=False) -> CommandResult:
         """Run an absolute executable; return nonzero exit codes without output in errors.
+
+        By default every process in the command's group is killed when it
+        returns. ``keep_descendants=True`` leaves descendants running only after
+        the command itself exited normally (for example services started by
+        package maintainer scripts); timeouts, output overflow, interrupts and
+        errors still kill the whole group. Descendants that keep the command's
+        output pipes open lose them after a one-second grace period.
 
         Validation and environment checks run before spawn. Once startup is
         attempted, an OSError/ValueError or subprocess handshake failure raises
@@ -248,6 +258,8 @@ class Runner:
             directory.encode("utf-8")
         except UnicodeError as exc:
             raise ValidationError("command working directory must be valid UTF-8") from exc
+        if type(keep_descendants) is not bool:
+            raise ValidationError("keep_descendants must be a boolean")
         if os.name != "posix":
             raise BackendError("command runner requires POSIX process groups")
         environment = self._environment()
@@ -258,6 +270,7 @@ class Runner:
         # No OS process exists yet. The same object remains reachable if
         # Popen.__init__ raises after creating a child but before returning.
         process = _CommandProcess()
+        completed = False
         with _defer_sigint() as interrupt:
             try:
                 try:
@@ -273,11 +286,16 @@ class Runner:
                 for stream, index in ((process.stdout, 0), (process.stderr, 1)):
                     os.set_blocking(stream.fileno(), False)
                     selector.register(stream, selectors.EVENT_READ, index)
+                exited_at = None
                 while selector.get_map():
                     interrupt()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise IndeterminateError("command exceeded its deadline; inspect operation state before retrying")
+                    if exited_at is None and process.poll() is not None:
+                        exited_at = time.monotonic()
+                    if exited_at is not None and time.monotonic() - exited_at >= _PIPE_GRACE:
+                        break  # The command exited; a descendant still holds an output pipe.
                     for key, _ in selector.select(min(remaining, 0.1)):
                         # At most one byte beyond the cap is read to detect overflow.
                         try:
@@ -301,13 +319,14 @@ class Runner:
                         break
                     except subprocess.TimeoutExpired:
                         continue
+                completed = True
                 return CommandResult(returncode, output[0].decode("utf-8", errors="replace"),
                                      output[1].decode("utf-8", errors="replace"))
             except OSError as exc:
                 raise IndeterminateError("command output could not be read; inspect operation state before retrying") from exc
             finally:
                 try:
-                    process.stop()
+                    process.stop(kill=not (keep_descendants and completed))
                 finally:
                     if selector is not None:
                         selector.close()

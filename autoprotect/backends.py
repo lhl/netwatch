@@ -325,6 +325,7 @@ class _Gated:
         self._recovery = False
         self._asset = None
         self._begun_plan = None
+        self._applying = False
 
     def _require_lock(self, *, recovery=None):
         if self._owner != (os.getpid(), threading.get_ident()):
@@ -401,6 +402,7 @@ class _Gated:
             self._recovery = recovery
             self._asset = asset_id
             self._begun_plan = None
+            self._applying = False
             gate = self._gate()
             if gate is None:
                 self._discard_unpublished_gate()
@@ -412,6 +414,7 @@ class _Gated:
             self._recovery = False
             self._asset = None
             self._begun_plan = None
+            self._applying = False
             if descriptor is not None:
                 os.close(descriptor)
 
@@ -426,6 +429,19 @@ class _Gated:
         except OSError as exc:
             raise IndeterminateError("execution gate could not be durably recorded; inspect recovery state") from exc
         self._begun_plan = plan_id
+
+    def cancel(self, plan_id):
+        """Withdraw a gate this lock just published when its claim was not recorded.
+
+        Engine calls this only when persisting the claim raised before commit.
+        Mutation cannot have started: apply() was never entered under this lock.
+        """
+        self._require_lock(recovery=False)
+        _hash(plan_id, "plan ID")
+        if self._begun_plan != plan_id or self._applying:
+            raise BackendError("only an unapplied gate published under this lock can be cancelled")
+        self._remove_gate({"plan_id": plan_id})
+        self._begun_plan = None
 
     def _remove_gate(self, expected):
         if self._gate() != expected:
@@ -486,6 +502,7 @@ class _Gated:
         self._require_lock(recovery=False)
         if self._begun_plan is None or self._gate() != {"plan_id": self._begun_plan}:
             raise BackendError("mutation requires a successfully published durable execution gate")
+        self._applying = True  # From here on the gate can only be cleared by outcome or recovery.
 
 
 class Simulator(_Gated):
@@ -808,8 +825,10 @@ class DebianApt(_Gated):
             # using only immutable, bounded release constraints, not more I/O.
             _check_release_times(constraints, max_age)
             try:
+                # Maintainer scripts may start services; do not kill them
+                # after dpkg itself has exited. Failures still kill the group.
                 result = self.runner.run(["/usr/bin/dpkg", "--force-confdef", "--force-confold", "--install", str(artifact)],
-                                         timeout=900, cwd=str(staging))
+                                         timeout=900, cwd=str(staging), keep_descendants=True)
                 if result.returncode != 0:
                     raise IndeterminateError("dpkg did not complete successfully; inspect package state")
                 observed = self.inspect()

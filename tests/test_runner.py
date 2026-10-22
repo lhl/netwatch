@@ -172,6 +172,49 @@ class RunnerTests(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork is needed for the descendant test")
+    def test_descendant_holding_pipes_after_success_is_bounded_and_optionally_kept(self):
+        # A daemon started by the command inherits its stdout and keeps running.
+        script = ("import os,signal,sys\n"
+                  "pid=os.fork()\n"
+                  "if pid:\n open(sys.argv[1],'w').write(str(pid)); print('done', flush=True); os._exit(0)\n"
+                  "signal.pause()\n")
+        for keep in (False, True):
+            with self.subTest(keep=keep), tempfile.TemporaryDirectory() as directory:
+                pidfile = Path(directory) / "daemon.pid"
+                started = time.monotonic()
+                try:
+                    result = Runner().run([PYTHON, "-c", script, str(pidfile)], timeout=30, keep_descendants=keep)
+                    self.assertEqual(result, CommandResult(0, "done\n", ""))
+                    self.assertLess(time.monotonic() - started, 5)
+                    daemon = int(pidfile.read_text())
+                    deadline = time.monotonic() + 2
+                    alive = True
+                    while alive and time.monotonic() < deadline:
+                        try:
+                            os.kill(daemon, 0)
+                            if keep:
+                                break
+                            time.sleep(0.02)
+                        except ProcessLookupError:
+                            alive = False
+                    self.assertEqual(alive, keep)
+                finally:
+                    if pidfile.exists():
+                        try:
+                            os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+    def test_failures_kill_descendants_even_when_keeping_was_requested(self):
+        with patch("autoprotect.runner.os.killpg", wraps=os.killpg) as killpg:
+            with self.assertRaises(IndeterminateError):
+                Runner(max_output_bytes=10).run([PYTHON, "-c", "import os,signal; os.write(1,b'x'*100); signal.pause()"],
+                                                keep_descendants=True)
+            self.assertTrue(killpg.called)
+        with self.assertRaises(ValidationError):
+            Runner().run([PYTHON, "-c", "pass"], keep_descendants="yes")
+
     def test_output_limit_kills_the_process_group(self):
         with patch("autoprotect.runner.os.killpg", wraps=os.killpg) as killpg:
             with self.assertRaises(IndeterminateError):

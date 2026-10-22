@@ -11,7 +11,7 @@ from .core import BackendError, IndeterminateError, PolicyError, ValidationError
 from .debian import compare_versions
 from .inventory import inventory_fingerprint, normalize_inventory
 from .matching import match, verify_affected
-from .store import FINAL_STATUSES, content_id
+from .store import content_id
 
 
 _MAX_DURATION = 31_536_000
@@ -527,10 +527,19 @@ class Engine:
         with self.backend.lock(envelope["body"]["asset_id"]):
             def claim():
                 body, policy, _ = self._preflight(plan_id)
-                # begin must be durable before committing executing. Any error,
-                # including an interrupt or uncertain commit, leaves this gate.
+                # begin must be durable before committing executing. An error
+                # while recording the claim (before any commit) withdraws the
+                # gate: nothing can have run. An interrupted begin or an
+                # uncertain commit leaves the gate for explicit recovery.
                 self.backend.begin(plan_id)
-                self.store.claim(plan_id, self._now(), expected=("approved",) if policy["mode"] == "manual" else ("pending", "approved"))
+                try:
+                    self.store.claim(plan_id, self._now(), expected=("approved",) if policy["mode"] == "manual" else ("pending", "approved"))
+                except BaseException:
+                    try:
+                        self.backend.cancel(plan_id)
+                    except Exception:
+                        pass  # The gate remains; recover/resolve-recovery handle it.
+                    raise
                 return body
             try:
                 self._run("execute", claim, plan_id)
@@ -687,14 +696,35 @@ class Engine:
                     raise PolicyError("Recovery backend does not match the plan")
                 gate = self._gate_evidence(retained)
                 self._require_recovery_gate(plan_id, gate)
-                if plan["status"] != "executing":
+                if plan["status"] == "executing":
+                    result = self.store.save_outcome(plan_id, "needs_attention",
+                        {"reason": "Abandoned execution requires operator inspection; recovery did not rerun or certify the action", "verified": False},
+                        None, self._now())
+                    self.store.event(self._now(), "execution-recovered", {"plan_id": plan_id, "gate_retained": True,
+                                                                          "gate": gate, "prior_plan_identity_verified": True})
+                    return result
+                if plan["status"] not in ("pending", "approved"):
                     raise PolicyError("Only abandoned executing work can be recovered; inspect the queue or use explicit gate resolution")
-                result = self.store.save_outcome(plan_id, "needs_attention",
-                    {"reason": "Abandoned execution requires operator inspection; recovery did not rerun or certify the action", "verified": False},
-                    None, self._now())
-                self.store.event(self._now(), "execution-recovered", {"plan_id": plan_id, "gate_retained": True,
+                # Mutation starts only after the executing claim commits. A
+                # gate on a pending/approved plan means that claim never took
+                # effect, so nothing ran: finalize as failed, then clear it.
+                reason = "Execution gate was published but its claim never committed; no mutation was started"
+                result = self.store.save_outcome(plan_id, "failed", {"reason": reason, "verified": False},
+                                                 None, self._now(), expected=("pending", "approved"))
+                self.store.event(self._now(), "execution-recovered", {"plan_id": plan_id, "gate_retained": False,
                                                                       "gate": gate, "prior_plan_identity_verified": True})
-                return result
+                previous_generation = self._generation()
+            # Clear only after the outcome commits. Rotation still forces fresh
+            # collection and plans, exactly as explicit resolution does.
+            self.backend.clear_gate(plan_id, reason)
+            generation = self._generation()
+            if generation == previous_generation:
+                raise IndeterminateError("Recovery did not rotate the target generation; inspect backend state before replanning")
+            with self.store.transaction():
+                self.store.event(self._now(), "recovery-gate-cleared", {"plan_id": plan_id, "actor": None, "reason": reason,
+                    "gate": gate, "prior_plan_identity_verified": True, "previous_generation": previous_generation,
+                    "target_generation": generation})
+            return result
 
     def resolve_recovery(self, plan_id, actor, reason, *, malformed_digest=None):
         content_id(plan_id)
@@ -714,10 +744,14 @@ class Engine:
                 plan = self.store.plan(plan_id)
                 if plan["body"]["backend"] != self.backend.name:
                     raise PolicyError("Recovery backend does not match the plan")
-                if plan["status"] not in FINAL_STATUSES:
+                # A malformed gate cannot identify its plan, so it may finalize
+                # only a plan that was actually executing. Other pending plans
+                # are left alone; the generation rotation still invalidates them.
+                finalizable = ("pending", "approved", "executing") if identity_verified else ("executing",)
+                if plan["status"] in finalizable:
                     self.store.save_outcome(plan_id, "needs_attention",
                         {"reason": "Operator recovery attestation; no successful remediation has been certified", "verified": False},
-                        None, self._now(), expected=("pending", "approved", "executing"))
+                        None, self._now(), expected=finalizable)
                 self.store.event(self._now(), "recovery-resolution-requested", {"plan_id": plan_id, "actor": actor,
                     "reason": reason, "actor_is_authenticated": False, "gate": gate,
                     "prior_plan_identity_verified": identity_verified, "previous_generation": previous_generation})
