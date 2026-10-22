@@ -14,10 +14,10 @@ This checklist tracks the original assignment: research security feeds and patch
 
 ## Research — `docs/SOURCES.md`
 
-- [ ] Fetch and inspect `https://pwn.watch/`, `/feed.xml`, `/incidents.json`, and `/llms.txt`. Separate the quoted incident claims from verified evidence.
-- [ ] Compare authoritative vulnerability and patch sources: CISA Known Exploited Vulnerabilities, OSV, GitHub advisories, NVD/CVE, vendor or distribution advisories, and EPSS exploitation probability.
-- [ ] Record each source's purpose, access method, identity/version semantics, limitations, and trust level. Do not treat news or severity scores as patch instructions.
-- [ ] Describe host, application dependency, container, and fleet inventory options, including distribution backports and stale inventory.
+- [x] Fetch and inspect `https://pwn.watch/`, `/feed.xml`, `/incidents.json`, and `/llms.txt`. Separate the quoted incident claims from verified evidence.
+- [x] Compare authoritative vulnerability and patch sources: CISA Known Exploited Vulnerabilities, OSV, GitHub advisories, NVD/CVE, vendor or distribution advisories, and EPSS exploitation probability.
+- [x] Record each source's purpose, access method, identity/version semantics, limitations, and trust level. Do not treat news or severity scores as patch instructions.
+- [x] Describe host, application dependency, container, and fleet inventory options, including distribution backports and stale inventory.
 
 ## Design — `docs/DESIGN.md`
 
