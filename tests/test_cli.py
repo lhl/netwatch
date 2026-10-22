@@ -511,6 +511,7 @@ class CliTests(unittest.TestCase):
                 args += ["--actor", "operator", "--reason", "Fixture inspected"]
             with self.subTest(command=command), \
                     patch("autoprotect.cli.os.geteuid", return_value=0), \
+                    patch.object(cli.local_files, "require_trusted_code") as trusted, \
                     patch.object(cli.local_files, "read_bytes", return_value=json.dumps(self.policy).encode()) as read, \
                     patch.object(cli.local_files, "prepare_database", return_value=self.root / "mock.sqlite3") as prepare, \
                     patch.object(cli, "Store"), patch.object(cli, "Engine", side_effect=create_engine), \
@@ -522,6 +523,20 @@ class CliTests(unittest.TestCase):
                 for call in read.call_args_list:
                     self.assertEqual(call.kwargs, {"max_bytes": 1024 * 1024, "private": True, "live": True})
                 native.lock.assert_called_once_with(ASSET, recovery=command != "execute")
+                package_dir, search_path = trusted.call_args.args
+                self.assertEqual(Path(package_dir), Path(cli.__file__).resolve().parent)
+                self.assertIs(search_path, sys.path)
+
+    def test_live_refuses_code_that_another_user_could_modify_before_reading_policy(self):
+        self.native_policy()
+        # This checkout and its tests are owned by the invoking user, not root.
+        with patch("autoprotect.cli.os.geteuid", return_value=0), \
+                patch.object(cli.local_files, "read_bytes", side_effect=AssertionError("policy opened")), \
+                patch.object(cli.local_files, "prepare_database", side_effect=AssertionError("state opened")):
+            result = self.invoke("--live", "execute", "a" * 64, expected=1)
+        self.assertEqual(result["error"]["code"], "policy_error")
+        self.assertIn("root-owned installation", result["error"]["message"])
+        self.assertFalse(self.state.exists())
 
     def test_native_collection_is_explicit_without_implicit_live_permission(self):
         self.native_policy()

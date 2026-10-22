@@ -51,7 +51,7 @@ python3 -m venv .venv
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/autoprotect demo
 ```
 
-These commands intentionally create `dist/`, build metadata and `.venv/` in your checkout. Provision the pinned build prerequisite separately if it is absent; the commands above do not install it. The installed `autoprotect` command and `python -m autoprotect` expose the same interface. The demo in the installed wheel does not depend on repository tests or example files.
+These commands intentionally create `dist/`, build metadata and `.venv/` in your checkout. That user-owned environment is for simulation and investigation only: `--live` refuses to run code or module search paths that a non-root user could modify. For native use, install the wheel into a root-owned environment such as `/opt/autoprotect` and run its `bin/autoprotect` entry point (see [root-owned installation](docs/OPERATIONS.md#root-owned-installation-for-live-commands)). Provision the pinned build prerequisite separately if it is absent; the commands above do not install it. The installed `autoprotect` command and `python -m autoprotect` expose the same interface. The demo in the installed wheel does not depend on repository tests or example files.
 
 To verify building and installed execution without leaving build or virtual-environment state in the checkout:
 

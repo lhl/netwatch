@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from autoprotect.core import ValidationError
-from autoprotect.local_files import prepare_database, read_bytes
+from autoprotect.local_files import prepare_database, read_bytes, require_trusted_code
 
 
 class LocalFileTests(unittest.TestCase):
@@ -184,6 +184,62 @@ class LocalFileTests(unittest.TestCase):
         directory = self.root / "state"
         relative = os.path.relpath(directory)
         self.assertEqual(prepare_database(relative), directory / "state.sqlite3")
+
+
+class TrustedCodeTests(unittest.TestCase):
+    """Uses the invoking user as the trusted owner; live mode requires root."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.root.chmod(0o755)
+        self.package = self.root / "site" / "autoprotect"
+        (self.package / "__pycache__").mkdir(parents=True)
+        for path in (self.root / "site", self.package, self.package / "__pycache__"):
+            path.chmod(0o755)
+        for name in ("cli.py", "_apt_probe.py", "__pycache__/cli.cpython-313.pyc"):
+            (self.package / name).write_bytes(b"# code")
+            (self.package / name).chmod(0o644)
+        self.owner = os.geteuid()
+
+    def check(self, search_path=(), owner=None):
+        require_trusted_code(self.package, [str(self.root / "site"), *search_path],
+                             owner=self.owner if owner is None else owner)
+
+    def test_owner_controlled_package_and_search_path_are_accepted(self):
+        archive = self.root / "python313.zip"
+        archive.write_bytes(b"zip")
+        archive.chmod(0o644)
+        self.check([str(archive), str(self.root / "missing")])
+
+    def test_writable_or_linked_code_and_untrusted_owners_are_rejected(self):
+        cases = [
+            lambda: (self.package / "_apt_probe.py").chmod(0o666),
+            lambda: (self.package / "__pycache__" / "cli.cpython-313.pyc").chmod(0o664),
+            lambda: (self.package / "__pycache__").chmod(0o777),
+            lambda: self.package.chmod(0o775),
+            lambda: (self.package / "extra.py").symlink_to(self.root / "elsewhere.py"),
+        ]
+        for mutate in cases:
+            with self.subTest(case=cases.index(mutate)):
+                self.setUp()
+                mutate()
+                with self.assertRaises(ValidationError):
+                    self.check()
+        self.setUp()
+        with self.assertRaises(ValidationError):
+            self.check(owner=self.owner + 1)  # This tree is not owned by that user.
+        writable = self.root / "writable-site"
+        writable.mkdir()
+        writable.chmod(0o777)
+        with self.assertRaises(ValidationError):
+            self.check([str(writable)])
+        (self.root / "linked-site").symlink_to(self.root / "site")
+        with self.assertRaises(ValidationError):
+            self.check([str(self.root / "linked-site")])
+        with patch("autoprotect.local_files.os.getcwd", return_value=str(writable)), self.assertRaises(ValidationError):
+            self.check([""])
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ No real APT resolution/download, native lock handoff, privileged installation, p
 
 ## State, policy and operator authority
 
-Every operational command requires `--state-dir DIR --policy FILE` **before** the subcommand. The policy selects `simulator` or `debian-apt`; there is no command-line backend override. `python3 -m autoprotect` and the installed `autoprotect` command expose the same interface. The application requires Python 3.12 and POSIX file controls.
+Every operational command requires `--state-dir DIR --policy FILE` **before** the subcommand. The policy selects `simulator` or `debian-apt`; there is no command-line backend override. `python3 -m autoprotect` and the installed `autoprotect` command expose the same interface. The application requires Python 3.12 or newer and POSIX file controls.
 
 The examples below use shell variables that the operator must set to reviewed local paths and returned identifiers:
 
@@ -29,6 +29,17 @@ ap() {
     --policy "$policy_file" "$@"
 }
 ```
+
+### Root-owned installation for live commands
+
+`--live` refuses to run unless every directory on Python's module search path and the complete `autoprotect` package (including the APT helper and bytecode caches) are root-owned, not group/world writable and free of symlinks, with root-owned ancestors. Otherwise root could execute code another user can modify: a user-owned checkout, virtual environment or current directory (`python3 -m` puts the current directory first on the path). Stock Debian 13 Python directories pass. Install a dedicated root-owned environment and invoke its entry point for live commands:
+
+```bash
+sudo python3 -m venv /opt/autoprotect
+sudo /opt/autoprotect/bin/python -m pip install --no-index --no-deps dist/autoprotect-0.1.0-py3-none-any.whl
+```
+
+Live templates below use `/opt/autoprotect/bin/autoprotect`. Non-live investigation may still use `ap`.
 
 ### Private files
 
@@ -153,7 +164,7 @@ Do not begin until the native qualification gates in this runbook are satisfied 
 5. Execute only in a separately authorized effective-root invocation, with all operational options before `execute`:
 
    ```bash
-   python3 -m autoprotect --state-dir "$state_dir" \
+   /opt/autoprotect/bin/autoprotect --state-dir "$state_dir" \
      --policy "$policy_file" --live execute "$plan_id"
    ```
 
@@ -203,7 +214,7 @@ The recovery commands below are conditional native templates with the same root/
 2. Read the gate evidence for a known stored plan:
 
    ```bash
-   python3 -m autoprotect --state-dir "$state_dir" \
+   /opt/autoprotect/bin/autoprotect --state-dir "$state_dir" \
      --policy "$policy_file" --live recovery-status "$plan_id"
    ```
 
@@ -211,7 +222,7 @@ The recovery commands below are conditional native templates with the same root/
 3. For abandoned `executing` work with the valid matching gate, record uncertainty:
 
    ```bash
-   python3 -m autoprotect --state-dir "$state_dir" \
+   /opt/autoprotect/bin/autoprotect --state-dir "$state_dir" \
      --policy "$policy_file" --live recover "$plan_id"
    ```
 
@@ -220,7 +231,7 @@ The recovery commands below are conditional native templates with the same root/
 5. Resolve the retained gate only after that investigation and recovery decision. `recovery_reason` must be a nonempty printable ASCII explanation, at most 2,048 characters, without surrounding whitespace or secrets:
 
    ```bash
-   python3 -m autoprotect --state-dir "$state_dir" \
+   /opt/autoprotect/bin/autoprotect --state-dir "$state_dir" \
      --policy "$policy_file" --live resolve-recovery "$plan_id" \
      --actor "$actor_label" --reason "$recovery_reason"
    ```
@@ -241,7 +252,7 @@ The recovery commands below are conditional native templates with the same root/
 For the malformed case only, set `malformed_digest` to the exact digest just returned by `recovery-status`, review the unverified identity, and explicitly request:
 
 ```bash
-python3 -m autoprotect --state-dir "$state_dir" \
+/opt/autoprotect/bin/autoprotect --state-dir "$state_dir" \
   --policy "$policy_file" --live resolve-recovery "$plan_id" \
   --actor "$actor_label" --reason "$recovery_reason" \
   --malformed-digest "$malformed_digest"

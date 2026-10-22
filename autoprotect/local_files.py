@@ -92,6 +92,57 @@ def _regular(info, *, private: bool, owner: int):
         raise ValidationError("private file must be owned by the invoking user with mode 0600 or stricter")
 
 
+def require_trusted_code(package_dir, search_path, *, owner: int = 0) -> None:
+    """Refuse live operation unless only ``owner`` (root) can change our code.
+
+    Checks the application package recursively (modules, the APT probe and
+    bytecode caches) and every existing ``sys.path`` directory, each with all
+    ancestors: owned by root, not group/world writable (sticky root-owned
+    ancestors excepted), and free of symlinks. Other modules on the path are
+    assumed to come from root-installed packages; their files are not walked.
+    A user-owned checkout, virtual environment or working directory on the
+    search path is rejected rather than executed with root privileges.
+    """
+    integer(owner, "trusted code owner")
+    if os.name != "posix":
+        raise ValidationError("trusted code checks require POSIX file controls")
+
+    def directory(path, *, recurse):
+        with _directory(_path(path), protected=True, owner=owner) as descriptor:
+            info = os.fstat(descriptor)
+            if info.st_uid != owner or info.st_mode & 0o022:
+                raise ValidationError("live code directories must be root-owned and not group/world writable")
+            if not recurse:
+                return
+            with os.scandir(descriptor) as entries:
+                names = sorted(entry.name for entry in entries)
+            for name in names:
+                child = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if child.st_uid != owner or child.st_mode & 0o022:
+                    raise ValidationError("live code files must be root-owned and not group/world writable")
+                if stat.S_ISDIR(child.st_mode):
+                    directory(os.path.join(path, name), recurse=True)
+                elif not stat.S_ISREG(child.st_mode):
+                    raise ValidationError("live code must contain only regular files and directories")
+
+    try:
+        directory(os.fspath(package_dir), recurse=True)
+        for entry in search_path:
+            if not isinstance(entry, str):
+                raise ValidationError("module search path entries must be text")
+            location = entry or os.getcwd()
+            if os.path.isdir(location):
+                directory(location, recurse=False)
+            elif os.path.lexists(location):
+                # Zip archives and similar importable files.
+                with _directory(_path(location).parent, protected=True, owner=owner) as parent:
+                    info = os.stat(_path(location).name, dir_fd=parent, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != owner or info.st_mode & 0o022:
+                    raise ValidationError("live importable files must be root-owned regular files")
+    except OSError as exc:
+        raise ValidationError("live code location cannot be inspected safely") from exc
+
+
 def read_bytes(path, *, max_bytes: int, private: bool = False, live: bool = False) -> bytes:
     """Read one bounded, stable regular file; live mode always implies private.
 

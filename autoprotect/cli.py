@@ -220,6 +220,12 @@ def _dispatch(engine, args, data):
 def _operate(args):
     if args.live and os.geteuid() != 0:
         raise core.PolicyError("--live requires effective root; use non-live commands for investigation")
+    if args.live:
+        try:
+            local_files.require_trusted_code(os.path.dirname(os.path.abspath(__file__)), sys.path)
+        except core.ValidationError as exc:
+            raise core.PolicyError("--live requires a root-owned installation and module search path; run the "
+                                   "installed entry point or python3 -I from a root-owned location (" + str(exc) + ")") from exc
     provider = _policy_provider(args.policy, live=args.live)
     policy = provider()
     if policy["backend"] == "simulator" and args.live:
