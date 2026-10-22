@@ -21,12 +21,12 @@ This checklist tracks the original assignment: research security feeds and patch
 
 ## Design — `docs/DESIGN.md`
 
-- [ ] Define requirements, non-goals, threat model, trust boundaries, and supported proof-of-concept scope.
-- [ ] Specify ingestion, provenance, normalization, deduplication, persistence, inventory, applicability matching, prioritization, and triage states.
-- [ ] Specify remediation plans, immutable approval binding, stale-plan rejection, policy modes, locking, bounded execution, verification, rollback limits, and audit records.
-- [ ] Define deployment and fleet evolution, polling, outage behavior, credentials, package-source trust, and observability.
-- [ ] Define advisory-only Jouzu integration and optional TextGuard inspection. Model output and cleaned text must never grant execution authority.
-- [ ] Mark every proposed production capability separately from implemented behavior.
+- [x] Define requirements, non-goals, threat model, trust boundaries, and supported proof-of-concept scope.
+- [x] Specify ingestion, provenance, normalization, deduplication, persistence, inventory, applicability matching, prioritization, and triage states.
+- [x] Specify remediation plans, immutable approval binding, stale-plan rejection, policy modes, locking, bounded execution, verification, rollback limits, and audit records.
+- [x] Define deployment and fleet evolution, polling, outage behavior, credentials, package-source trust, and observability.
+- [x] Define advisory-only Jouzu integration and optional TextGuard inspection. Model output and cleaned text must never grant execution authority.
+- [x] Mark every proposed production capability separately from implemented behavior.
 
 ## Implementation — Python package, CLI, and examples
 
