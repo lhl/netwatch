@@ -74,7 +74,7 @@ class RuntimePipelineTests(unittest.TestCase):
     def plan(self, engine=None):
         engine = engine or self.engine
         findings = engine.triage("integration-host")
-        row = next(item for item in findings if item["advisory_id"] == "CVE-2026-10001")
+        row = next(item for item in findings if "CVE-2026-10001" in item["advisory_ids"])
         self.assertEqual(row["status"], "affected")
         return engine.plan(row["id"])
 
@@ -99,7 +99,7 @@ class RuntimePipelineTests(unittest.TestCase):
         package.update(version="1:1.0-1+deb13u2+b1", source_version="1:1.0-1+deb13u2")
         self.assertEqual(after["packages"], expected)
         rows = self.engine.triage("integration-host")
-        self.assertEqual(next(row for row in rows if row["advisory_id"] == "CVE-2026-10001")["status"], "not_affected")
+        self.assertEqual(next(row for row in rows if "CVE-2026-10001" in row["advisory_ids"])["status"], "not_affected")
         self.assertTrue(any(row["status"] == "unknown" for row in rows))
         with self.assertRaises(AutoprotectError):
             self.engine.execute(plan["id"])

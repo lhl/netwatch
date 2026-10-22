@@ -98,6 +98,94 @@ def _verdict(package: dict, assertion: dict) -> tuple[str, str]:
     return "not_affected", "Installed Debian source version meets the release-specific fix"
 
 
+_ACQUISITIONS = (None, "https", "import")
+
+
+def _global_reason(inventory: dict, now: int, max_inventory_age: int) -> str | None:
+    if inventory["observed_at"] > now:
+        return "Inventory observation is in the future"
+    if now - inventory["observed_at"] > max_inventory_age:
+        return "Inventory is stale; collect a fresh inventory"
+    if not inventory["complete"]:
+        return "Inventory is incomplete; missing packages cannot be declared safe"
+    if (inventory["os"], inventory["release"], inventory["architecture"]) != ("debian", "trixie", "amd64"):
+        return "Unsupported platform; only Debian trixie amd64 applicability is implemented"
+    return None
+
+
+def _package_reason(package: dict) -> str | None:
+    if package["ecosystem"] != "deb" or package["architecture"] not in ("amd64", "all"):
+        return "Unsupported package ecosystem or architecture"
+    if package["status"] != "installed":
+        return "Package is not in a fully installed state; investigate package state"
+    return None
+
+
+def _urgency(assertion: dict) -> int:
+    return _URGENCY.get(assertion["urgency"].removesuffix("**"), 30)
+
+
+_NOT_AFFECTED = ("Installed Debian source version meets the release-specific fix, "
+                 "or Debian marks it not affected, for every listed advisory")
+
+
+def _groups(package: dict, applicable: list[dict]) -> list[dict]:
+    """Group one assessable package's verdicts by remediation identity.
+
+    Assertions that share a status, fixed version and explanation need the same
+    action (or investigation), so one finding lists all of their advisories.
+    An affected group with a fixed version is exactly one candidate upgrade.
+    """
+    groups: dict[tuple, dict] = {}
+    for assertion in applicable:
+        status, detail = _verdict(package, assertion)
+        if status == "not_affected":
+            key, fixed, detail = (status, None, _NOT_AFFECTED), None, _NOT_AFFECTED
+        else:
+            fixed = assertion.get("fixed_version") if status == "affected" else None
+            key = (status, fixed, detail)
+        group = groups.setdefault(key, {"status": status, "fixed_version": fixed, "reason": detail, "assertions": []})
+        group["assertions"].append(assertion)
+    return [groups[key] for key in sorted(groups, key=lambda item: (item[0], item[1] or "", item[2]))]
+
+
+def verify_affected(
+    inventory: dict,
+    assertions: list[dict],
+    *,
+    package: dict,
+    advisory_ids: list[str],
+    fixed_version: str,
+    max_inventory_age: int,
+) -> bool:
+    """Recompute one affected finding exactly as match() would, without fan-out.
+
+    The inventory is evaluated at its own observation time; callers check
+    current freshness separately. Only assertions for the package's own source
+    are validated and consulted. The advisory group must match exactly.
+    """
+    from .inventory import normalize_inventory
+
+    if not isinstance(inventory, dict):
+        raise ValidationError("inventory must be an object")
+    inventory = normalize_inventory(inventory, collector=inventory.get("collector", "imported"))
+    integer(max_inventory_age, "inventory maximum age", minimum=1, maximum=31_536_000)
+    if not isinstance(assertions, list) or len(assertions) > _MAX_ASSERTIONS:
+        raise ValidationError("advisories must be a bounded list")
+    if not isinstance(advisory_ids, list) or not advisory_ids:
+        return False
+    if package not in inventory["packages"] or package["ecosystem"] != "deb":
+        return False
+    if (_global_reason(inventory, inventory["observed_at"], max_inventory_age)
+            or _package_reason(package)):
+        return False
+    relevant = [row for row in assertions if isinstance(row, dict) and row.get("source_name") == package["source_name"]]
+    applicable = _assertions(relevant).get((package["source_name"], inventory["release"]), [])
+    return any(group["status"] == "affected" and group["fixed_version"] == fixed_version
+               and sorted(row["id"] for row in group["assertions"]) == advisory_ids
+               for group in _groups(package, applicable))
+
+
 def match(
     inventory: dict,
     assertions: list[dict],
@@ -107,11 +195,16 @@ def match(
     source_digest: str,
     now: int,
     max_inventory_age: int,
+    evidence_acquisition: str | None = None,
 ) -> list[dict]:
     """Return deterministic findings for normalized data, with explicit unknowns.
 
-    Provenance and source health are Engine responsibilities. A not_affected row
-    is scoped to one source-package/advisory assertion, not universal host safety.
+    Provenance and source health are Engine responsibilities. Each package row
+    covers the advisories listed in ``advisory_ids``; a not_affected row is
+    scoped to those assertions, not universal host safety. Rows group one
+    package's assertions by status, fixed version and explanation, so output
+    grows with distinct remediation decisions rather than with each binary's
+    full advisory history. An unassessable package has a single unknown row.
     """
     from .inventory import normalize_inventory
 
@@ -122,26 +215,19 @@ def match(
     _hash(source_digest, "source digest")
     integer(now, "current time")
     integer(max_inventory_age, "inventory maximum age", minimum=1, maximum=31_536_000)
+    if evidence_acquisition not in _ACQUISITIONS:
+        raise ValidationError("evidence acquisition must be https, import, or null")
     assertion_index = _assertions(assertions)
     incident_index, incident_rows = _incidents(incidents)
     findings: list[dict] = []
     correlated = set()
     association_count = result_bytes = 0
+    imported = "; Debian evidence was imported, not acquired by a fixed-endpoint HTTPS poll"
 
-    global_reason = None
-    if inventory["observed_at"] > now:
-        global_reason = "Inventory observation is in the future"
-    elif now - inventory["observed_at"] > max_inventory_age:
-        global_reason = "Inventory is stale; collect a fresh inventory"
-    elif not inventory["complete"]:
-        global_reason = "Inventory is incomplete; missing packages cannot be declared safe"
-    elif (inventory["os"], inventory["release"], inventory["architecture"]) != (
-        "debian", "trixie", "amd64"
-    ):
-        global_reason = "Unsupported platform; only Debian trixie amd64 applicability is implemented"
+    global_reason = _global_reason(inventory, now, max_inventory_age)
 
-    def append(package: dict | None, assertion: dict | None, status: str, reason: str,
-               related: list[dict], priority: int) -> None:
+    def append(package: dict | None, covered: list[dict], status: str, reason: str,
+               related: list[dict], priority: int, fixed_version: str | None = None) -> None:
         nonlocal association_count, result_bytes
         if len(findings) >= _MAX_FINDINGS:
             raise ValidationError("Applicability result exceeds the finding limit; narrow inventory scope")
@@ -149,13 +235,14 @@ def match(
         if association_count > _MAX_ASSOCIATIONS:
             raise ValidationError("Applicability result exceeds the correlation limit; narrow inventory scope")
         if status == "not_affected":
-            priority_reasons = ["Not affected by this assertion: priority 0"]
+            priority_reasons = ["Not affected by these assertions: priority 0"]
         elif related and all(item["is_example"] for item in related):
             priority_reasons = ["Example incident is not actionable: priority 0"]
         else:
             priority_reasons = []
-            if assertion:
-                priority_reasons.append("Debian urgency: " + assertion["urgency"])
+            if covered:
+                highest = max(covered, key=lambda row: (_urgency(row), row["urgency"]))
+                priority_reasons.append("Highest Debian urgency: " + highest["urgency"])
             priority_reasons.extend(
                 "Incident " + item["id"] + " severity: " + item["severity"]
                 for item in sorted(related, key=lambda row: row["id"])
@@ -163,16 +250,19 @@ def match(
             if not priority_reasons:
                 priority_reasons = ["Unknown coverage baseline: priority 30"]
             priority_reasons.append("Ordering only; neither probability nor execution authorization")
+        if covered and evidence_acquisition == "import":
+            reason += imported
         body = {
             "asset_id": inventory["asset_id"],
             "inventory_id": inventory_id,
             "package": package,
-            "advisory_id": assertion["id"] if assertion else None,
+            "advisory_ids": sorted(row["id"] for row in covered),
             "source_name": package["source_name"] if package else None,
             "source_digest": source_digest,
+            "evidence_acquisition": evidence_acquisition,
             "status": status,
             "reason": reason,
-            "fixed_version": assertion.get("fixed_version") if assertion else None,
+            "fixed_version": fixed_version,
             "priority": priority,
             "priority_reasons": priority_reasons,
             "incident_ids": sorted({item["id"] for item in related}),
@@ -183,41 +273,49 @@ def match(
             raise ValidationError("Applicability result exceeds the output byte limit; narrow inventory scope")
         findings.append(finding)
 
+    def related_to(covered: list[dict]) -> list[dict]:
+        related = {item["id"]: item for assertion in covered for item in incident_index.get(assertion["id"], [])}
+        correlated.update(related)
+        return [related[key] for key in sorted(related)]
+
+    # Verdicts depend on source identity/version, not on the binary. Compute
+    # them once per source so multi-binary sources do not repeat the work.
+    grouped: dict[tuple, list[dict]] = {}
     for package in inventory["packages"]:
-        reason = global_reason
-        if package["ecosystem"] != "deb" or package["architecture"] not in ("amd64", "all"):
-            reason = reason or "Unsupported package ecosystem or architecture"
-        elif package["status"] != "installed":
-            reason = reason or "Package is not in a fully installed state; investigate package state"
+        reason = global_reason or _package_reason(package)
         applicable = (
             assertion_index.get((package["source_name"], inventory["release"]), [])
             if package["ecosystem"] == "deb" else []
         )
         if not applicable:
-            append(package, None, "unknown", reason or "No assertion for this source package/release in this dataset", [], 30)
+            append(package, [], "unknown", reason or "No assertion for this source package/release in this dataset", [], 30)
             continue
-        for assertion in applicable:
-            related = incident_index.get(assertion["id"], [])
-            correlated.update(item["id"] for item in related)
-            status, detail = ("unknown", reason) if reason else _verdict(package, assertion)
-            urgency = _URGENCY.get(assertion["urgency"].removesuffix("**"), 30)
-            priority = max([urgency] + [_SEVERITY.get(item["severity"], 30) for item in related])
-            if status == "not_affected":
-                priority = 0
-            # The held flag affects remediation permission, not whether code is
-            # vulnerable. It is retained in the package and explained here.
-            if package["held"]:
-                detail += "; package is held, so native remediation is blocked"
-            append(package, assertion, status, detail, related, priority)
+        # The held flag affects remediation permission, not whether code is
+        # vulnerable. It is retained in the package and explained here.
+        held = "; package is held, so native remediation is blocked" if package["held"] else ""
+        if reason:
+            related = related_to(applicable)
+            priority = max([_urgency(row) for row in applicable] + [_SEVERITY.get(item["severity"], 30) for item in related])
+            append(package, applicable, "unknown", reason + held, related, priority)
+            continue
+        key = (package["source_name"], package["source_version"])
+        if key not in grouped:
+            grouped[key] = _groups(package, applicable)
+        for group in grouped[key]:
+            covered = group["assertions"]
+            related = related_to(covered)
+            priority = 0 if group["status"] == "not_affected" else max(
+                [_urgency(row) for row in covered] + [_SEVERITY.get(item["severity"], 30) for item in related])
+            append(package, covered, group["status"], group["reason"] + held, related, priority, group["fixed_version"])
 
     for incident in incident_rows:
         if incident["id"] not in correlated:
             example = incident["is_example"]
-            append(None, None, "unknown",
+            append(None, [], "unknown",
                    "Example incident; excluded from applicability evidence" if example else
                    "Incident has no supported package assertion in this inventory; investigate separately",
                    [incident], 0 if example else _SEVERITY.get(incident["severity"], 30))
     if not inventory["packages"]:
-        append(None, None, "unknown", global_reason or
+        append(None, [], "unknown", global_reason or
                "No packages were observed; this does not establish host safety", [], 30)
     return sorted(findings, key=lambda row: (-row["priority"], row["id"]))

@@ -29,7 +29,7 @@ ap audit
 ap export example-host
 ```
 
-Execution must return `status: succeeded` and `result.verified: true`; the collected `example-app` version becomes `1.0-1+deb13u1`. The advisory-specific finding becomes `not_affected`, which is not a claim of complete security coverage. `tutorial-operator` is an audit label, not an authenticated identity. Exported advisory content remains untrusted data, even when its text looks like instructions.
+Execution must return `status: succeeded` and `result.verified: true`; the collected `example-app` version becomes `1.0-1+deb13u1`. The finding whose `advisory_ids` lists that advisory becomes `not_affected`, which is not a claim of complete security coverage. `tutorial-operator` is an audit label, not an authenticated identity. Exported advisory content remains untrusted data, even when its text looks like instructions.
 
 For automatic execution, run the same procedure in a **new** temporary directory, copy `examples/simulator-auto-policy.json` instead, and omit `ap approve`. `ap execute` still performs policy, freshness, target and installed-state checks. Changing the policy after planning invalidates that plan; do not switch policies to reuse its approval.
 

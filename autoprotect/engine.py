@@ -10,7 +10,7 @@ from . import core, feeds
 from .core import BackendError, IndeterminateError, PolicyError, ValidationError
 from .debian import compare_versions
 from .inventory import inventory_fingerprint, normalize_inventory
-from .matching import match
+from .matching import match, verify_affected
 from .store import FINAL_STATUSES, content_id
 
 
@@ -108,6 +108,9 @@ class Engine:
         self.backend = backend
         self.clock = clock
         self._fetcher = feeds.fetch_source if fetcher is None else fetcher
+        # Snapshot IDs whose records digest was checked. The Store re-verifies
+        # the immutable bytes on every load; this property follows from them.
+        self._content_checked = set()
 
     def _now(self):
         return core.integer(self.clock(), "current time")
@@ -177,46 +180,72 @@ class Engine:
         with self.store.transaction():
             result = self.store.record_source(source, self._now(), body=body)
             self.store.event(self._now(), "source-import", {"source": source, "snapshot_id": result["snapshot_id"]})
+            self._prune()
             return result
+
+    def _prune(self):
+        deleted = self.store.prune()
+        if any(deleted.values()):
+            self.store.event(self._now(), "evidence-pruned", deleted)
 
     def poll(self, source):
         source = self._source(source)
-        # No authorization decision crosses a transaction release. Concurrent
-        # imports/polls cannot install an older response over a newer source head.
-        failure = None
-        with self.store.transaction():
+        # Fetch and parse without holding the write lock. The response is
+        # installed only if the source head is still the one it was requested
+        # against, so a concurrent import/poll is never overwritten.
+        with self.store.read():
             previous = self.store.source_health(source)
-            validator = None
+            validator = prior_body = None
             if previous and previous["snapshot_id"] and previous["acquisition"] == "https":
                 prior_body = self.store.get("source", previous["snapshot_id"])
                 if prior_body["endpoint"] == _ENDPOINTS[source] and prior_body["source"] == source:
                     validator = self._etag(previous["etag"])
-            self.store.connection.execute("SAVEPOINT poll_result")
-            try:
-                response = self._fetcher(source, etag=validator)
-                _exact(response, {"not_modified", "raw", "etag"}, "Fetch result")
-                if type(response["not_modified"]) is not bool:
-                    raise ValidationError("Fetch result not_modified must be boolean")
-                etag = self._etag(response["etag"])
-                if response["not_modified"]:
-                    if validator is None or response["raw"] is not None:
-                        raise ValidationError("304 requires a prior same-source HTTPS snapshot and request validator")
-                    body = prior_body
-                    etag = etag or validator
-                else:
-                    body = self._source_body(source, response["raw"], "https")
-                result = self.store.record_source(source, self._now(), body=body, etag=etag)
-                self.store.event(self._now(), "source-poll", {"source": source, "snapshot_id": result["snapshot_id"],
-                                                             "not_modified": response["not_modified"]})
-            except (Exception, KeyboardInterrupt) as exc:
-                self.store.connection.execute("ROLLBACK TO poll_result")
-                result = self.store.record_source(source, self._now(), error="HTTPS refresh failed; previous good data retained")
-                self.store.event(self._now(), "source-error", {"source": source, "operation": "poll"})
-                failure = exc
-            finally:
-                self.store.connection.execute("RELEASE poll_result")
+        revision = previous["revision"] if previous else None
+        failure = body = etag = response = None
+        try:
+            response = self._fetcher(source, etag=validator)
+            _exact(response, {"not_modified", "raw", "etag"}, "Fetch result")
+            if type(response["not_modified"]) is not bool:
+                raise ValidationError("Fetch result not_modified must be boolean")
+            etag = self._etag(response["etag"])
+            if response["not_modified"]:
+                if validator is None or response["raw"] is not None:
+                    raise ValidationError("304 requires a prior same-source HTTPS snapshot and request validator")
+                body = prior_body
+                etag = etag or validator
+            else:
+                body = self._source_body(source, response["raw"], "https")
+        except (Exception, KeyboardInterrupt) as exc:
+            failure = exc
+        with self.store.transaction():
+            current = self.store.source_health(source)
+            if (current["revision"] if current else None) != revision:
+                self.store.event(self._now(), "source-error", {"source": source, "operation": "poll",
+                                                               "reason": "source head changed concurrently"})
+                changed = True
+            else:
+                changed = False
+                if failure is None:
+                    # A savepoint rolls back a partly recorded success while
+                    # retaining the failed-acquisition record below.
+                    self.store.connection.execute("SAVEPOINT poll_result")
+                    try:
+                        result = self.store.record_source(source, self._now(), body=body, etag=etag)
+                        self.store.event(self._now(), "source-poll", {"source": source, "snapshot_id": result["snapshot_id"],
+                                                                     "not_modified": response["not_modified"]})
+                        self._prune()
+                    except (Exception, KeyboardInterrupt) as exc:
+                        self.store.connection.execute("ROLLBACK TO poll_result")
+                        failure = exc
+                    finally:
+                        self.store.connection.execute("RELEASE poll_result")
+                if failure is not None:
+                    result = self.store.record_source(source, self._now(), error="HTTPS refresh failed; previous good data retained")
+                    self.store.event(self._now(), "source-error", {"source": source, "operation": "poll"})
         if isinstance(failure, KeyboardInterrupt):
             raise failure
+        if changed:
+            raise core.AutoprotectError("Source head changed during this poll; the response was discarded, poll again")
         # Health summaries expose failed acquisition without leaking remote text.
         return result
 
@@ -261,8 +290,12 @@ class Engine:
             return health, None
         body = self.store.get("source", health["snapshot_id"])
         if (body["source"] != source or body["acquisition"] != health["acquisition"] or
-                body["endpoint"] != health["endpoint"] or core.digest(body["records"]) != body["content_digest"]):
+                body["endpoint"] != health["endpoint"]):
             raise ValidationError("Source head does not match its immutable acquisition metadata")
+        if health["snapshot_id"] not in self._content_checked:
+            if core.digest(body["records"]) != body["content_digest"]:
+                raise ValidationError("Source head does not match its immutable acquisition metadata")
+            self._content_checked.add(health["snapshot_id"])
         return health, body
 
     def _triage(self, asset_id, policy):
@@ -273,13 +306,17 @@ class Engine:
             0 <= self._now() - health["last_success"] <= policy["max_feed_age"])
         findings = match(inventory["body"], debian["records"] if debian and usable else [], pwn["records"] if pwn else [],
                          inventory_id=inventory["id"], source_digest=health["snapshot_id"] if debian else core.digest([]),
-                         now=self._now(), max_inventory_age=policy["max_inventory_age"])
+                         now=self._now(), max_inventory_age=policy["max_inventory_age"],
+                         evidence_acquisition=debian["acquisition"] if debian and usable else None)
         if not usable:
             for row in findings:
                 row["reason"] += "; Debian source is missing, stale, or has a current error; refresh it before remediation"
                 row["id"] = core.digest({k: v for k, v in row.items() if k != "id"})
+        # Only affected findings can become plans. Persist those, not the
+        # complete (possibly large) investigation result returned to the caller.
         self.store.save_findings({"inventory_id": inventory["id"], "source_digest": health["snapshot_id"] if debian else None,
-                                  "findings": findings})
+                                  "findings": [row for row in findings if row["status"] == "affected"]})
+        self._prune()
         return findings
 
     def triage(self, asset_id):
@@ -343,6 +380,8 @@ class Engine:
         return copy.deepcopy(target)
 
     def _finding_context(self, finding, policy):
+        if "advisory_ids" not in finding:
+            raise _Stale("Finding predates grouped advisory findings; triage again and replan")
         if finding["status"] != "affected" or finding["package"] is None or finding["fixed_version"] in (None, "0"):
             raise PolicyError("Only an affected Debian finding with a supported fix can produce a plan")
         core.version(finding["fixed_version"], "fixed version")
@@ -354,11 +393,9 @@ class Engine:
         self._permission(policy, current["body"], finding["package"])
         self._collection_generation(finding["asset_id"])
         # Recompute rather than letting a stored affected label grant authority.
-        checked = match(original, source["records"], [], inventory_id=finding["inventory_id"],
-                        source_digest=finding["source_digest"], now=original["observed_at"],
-                        max_inventory_age=policy["max_inventory_age"])
-        if not any(row["package"] == finding["package"] and row["advisory_id"] == finding["advisory_id"] and
-                   row["fixed_version"] == finding["fixed_version"] and row["status"] == "affected" for row in checked):
+        if not verify_affected(
+                original, source["records"], package=finding["package"], advisory_ids=finding["advisory_ids"],
+                fixed_version=finding["fixed_version"], max_inventory_age=policy["max_inventory_age"]):
             raise PolicyError("Finding is not supported by its immutable Debian evidence")
         return current["body"]
 
@@ -378,7 +415,7 @@ class Engine:
             body = {"schema_version": 1, "asset_id": finding["asset_id"], "backend": self.backend.name,
                     "target_generation": self._collection_generation(finding["asset_id"]),
                     "inventory_id": finding["inventory_id"], "inventory_fingerprint": inventory_fingerprint(inventory),
-                    "source_digest": finding["source_digest"], "finding_id": finding_id, "advisory_id": finding["advisory_id"],
+                    "source_digest": finding["source_digest"], "finding_id": finding_id, "advisory_ids": finding["advisory_ids"],
                     "fixed_version": finding["fixed_version"], "policy_digest": core.digest(policy), "target": target,
                     "created_at": at, "expires_at": at + policy["plan_ttl"]}
             self._final_authorization(body, inventory_at=inventory["observed_at"], allow_observe=True)
@@ -422,6 +459,8 @@ class Engine:
         if envelope["status"] not in (("executing",) if executing else ("pending", "approved")):
             raise PolicyError("Plan is final or already claimed; collect and create a new plan")
         body = envelope["body"]
+        if "advisory_ids" not in body:
+            raise _Stale("Plan predates grouped advisory findings; triage again and create a new plan")
         policy = self._policy()
         if policy["mode"] == "observe":
             raise PolicyError("Observe policy permits neither approval nor execution")
@@ -438,7 +477,7 @@ class Engine:
                 inventory_fingerprint(current) != body["inventory_fingerprint"]):
             raise _Stale("Inventory head no longer matches the plan; collect and replan")
         finding = self.store.finding(body["finding_id"])
-        if any(body[field] != finding[field] for field in ("asset_id", "inventory_id", "source_digest", "advisory_id", "fixed_version")):
+        if any(body[field] != finding[field] for field in ("asset_id", "inventory_id", "source_digest", "advisory_ids", "fixed_version")):
             raise ValidationError("Plan does not match its bound finding")
         self._finding_context(finding, policy)
         self._target(body["target"], finding["package"], body["fixed_version"], policy)
@@ -576,11 +615,11 @@ class Engine:
         return result
 
     def queue(self):
-        with self.store.transaction():
+        with self.store.read():
             return self.store.plans()
 
     def audit(self):
-        with self.store.transaction():
+        with self.store.read():
             return self.store.audit()
 
     def export(self, asset_id):
@@ -627,7 +666,7 @@ class Engine:
         content_id(plan_id)
         plan = self.store.plan(plan_id)
         with self.backend.lock(plan["body"]["asset_id"], recovery=True) as retained:
-            with self.store.transaction():
+            with self.store.read():
                 self._policy()
                 plan = self.store.plan(plan_id)
                 if plan["body"]["backend"] != self.backend.name:

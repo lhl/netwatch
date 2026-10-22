@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
 
     def test_idempotent_schema_foreign_keys_timeout_and_context_manager(self):
         with Store(self.path) as other:
-            self.assertEqual(other.connection.execute("PRAGMA user_version").fetchone()[0], 2)
+            self.assertEqual(other.connection.execute("PRAGMA user_version").fetchone()[0], 3)
             self.assertEqual(other.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(other.connection.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
             self.assertEqual(other.connection.execute("PRAGMA synchronous").fetchone()[0], 2)
@@ -31,7 +31,7 @@ class StoreTests(unittest.TestCase):
             other.audit()
 
     def test_schema_version_and_unknown_existing_schema_are_rejected_without_deletion(self):
-        self.store.connection.execute("PRAGMA user_version=3")
+        self.store.connection.execute("PRAGMA user_version=4")
         with self.assertRaisesRegex(ValidationError, "schema version"):
             Store(self.path)
         self.store.connection.execute("PRAGMA user_version=0")
@@ -72,11 +72,14 @@ class StoreTests(unittest.TestCase):
     def test_immutable_objects_and_audit_reject_update_delete_and_detect_corruption(self):
         with self.store.transaction():
             key = self.store.put("source", {"value": 1})
+            self.store.put("plan", {"permanent": "plan"})
+            self.store.put("approval", {"permanent": "approval"})
             self.store.event(100, "source-import", {"snapshot_id": key})
-        for table in ("objects", "audit"):
-            for statement in (f"DELETE FROM {table}", f"UPDATE {table} SET rowid=rowid"):
-                with self.assertRaises(sqlite3.IntegrityError):
-                    self.store.connection.execute(statement)
+        statements = ["DELETE FROM audit", "UPDATE audit SET rowid=rowid", "UPDATE objects SET rowid=rowid",
+                      "DELETE FROM objects WHERE kind='plan'", "DELETE FROM objects WHERE kind='approval'"]
+        for statement in statements:
+            with self.assertRaises(sqlite3.IntegrityError):
+                self.store.connection.execute(statement)
         self.store.connection.execute("DROP TRIGGER immutable_objects_update")
         self.store.connection.execute("UPDATE objects SET body='{}' WHERE id=?", (key,))
         with self.assertRaisesRegex(ValidationError, "hash"):
@@ -192,6 +195,80 @@ class StoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "schema version"):
             Store(self.path)
         self.assertEqual(self.store.get("source", key), {"test": "preserved across unsupported schema"})
+
+    def test_version_2_store_migrates_without_losing_records(self):
+        finding = {"asset_id": "asset", "status": "affected"}
+        finding = {"id": digest(finding), **finding}
+        with self.store.transaction():
+            set_id = self.store.save_findings({"inventory_id": "i" * 64, "source_digest": "s" * 64, "findings": [finding]})
+            plan_id = self.store.save_plan({"test": "v2 plan"})["id"]
+        # Recreate the exact version 2 layout from this version 3 file.
+        connection = self.store.connection
+        connection.execute("DROP TABLE finding_sets")
+        connection.execute("DROP TRIGGER immutable_objects_delete")
+        connection.execute("CREATE TRIGGER immutable_objects_delete BEFORE DELETE ON objects "
+                           "BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
+        connection.execute("PRAGMA user_version=2")
+        with Store(self.path) as migrated:
+            self.assertEqual(migrated.connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(migrated.finding(finding["id"]), finding)
+            self.assertEqual(migrated.plan(plan_id)["status"], "pending")
+            self.assertEqual(tuple(migrated.connection.execute("SELECT * FROM finding_sets").fetchone()),
+                             (set_id, "i" * 64, "s" * 64))
+            with self.assertRaises(sqlite3.IntegrityError):
+                migrated.connection.execute("DELETE FROM objects WHERE kind='plan'")
+
+    def test_verified_cache_never_hides_tampering_or_shares_values(self):
+        body = {"records": ["x" * 1024] * 128}
+        with self.store.transaction():
+            key = self.store.put("source", body)
+        self.assertEqual(self.store.get("source", key), body)
+        cached = self.store.get("source", key)
+        cached["records"].append("changed")
+        self.assertEqual(self.store.get("source", key), body)
+        self.store.connection.execute("DROP TRIGGER immutable_objects_update")
+        self.store.connection.execute("UPDATE objects SET body=? WHERE id=?", ('{"records":[]}', key))
+        with self.assertRaisesRegex(ValidationError, "hash"):
+            self.store.get("source", key)
+
+    def test_prune_removes_only_unreferenced_evidence(self):
+        def findings(inventory_id, source_digest, name):
+            row = {"asset_id": name, "status": "affected"}
+            return {"inventory_id": inventory_id, "source_digest": source_digest,
+                    "findings": [{"id": digest(row), **row}]}, digest(row)
+        with self.store.transaction():
+            old_inventory = self.store.save_inventory({"asset_id": "asset", "n": 1})["id"]
+            planned_source = self.store.record_source("debian", 100, body={"source": "debian", "acquisition": "import",
+                                                                          "endpoint": None, "n": 1})["snapshot_id"]
+            planned_set, planned_finding = findings(old_inventory, planned_source, "planned")
+            self.store.save_findings(planned_set)
+            plan_id = self.store.save_plan({"source_digest": planned_source, "inventory_id": old_inventory,
+                                            "finding_id": planned_finding})["id"]
+            stale_set, stale_finding = findings(old_inventory, planned_source, "stale")
+            self.store.save_findings(stale_set)
+            middle = self.store.record_source("debian", 101, body={"source": "debian", "acquisition": "import",
+                                                                  "endpoint": None, "n": 2})["snapshot_id"]
+            head = self.store.record_source("debian", 102, body={"source": "debian", "acquisition": "import",
+                                                                "endpoint": None, "n": 3})["snapshot_id"]
+            discarded_inventory = self.store.save_inventory({"asset_id": "asset", "n": 2})["id"]
+            current_inventory = self.store.save_inventory({"asset_id": "asset", "n": 3})["id"]
+            current_set, current_finding = findings(current_inventory, head, "current")
+            self.store.save_findings(current_set)
+            deleted = self.store.prune()
+        self.assertEqual(deleted, {"findings": 1, "source": 1, "inventory": 1})
+        kinds = {kind: {row[0] for row in self.store.connection.execute("SELECT id FROM objects WHERE kind=?", (kind,))}
+                 for kind in ("source", "inventory", "plan")}
+        self.assertEqual(kinds["source"], {planned_source, head})
+        self.assertNotIn(middle, kinds["source"])
+        self.assertEqual(kinds["inventory"], {old_inventory, current_inventory})
+        self.assertNotIn(discarded_inventory, kinds["inventory"])
+        self.assertEqual(kinds["plan"], {plan_id})
+        self.assertEqual(self.store.finding(planned_finding)["asset_id"], "planned")
+        self.assertEqual(self.store.finding(current_finding)["asset_id"], "current")
+        with self.assertRaisesRegex(ValidationError, "not plannable"):
+            self.store.finding(stale_finding)
+        with self.assertRaisesRegex(AutoprotectError, "explicit"):
+            self.store.prune()
 
     def test_audit_order_and_bounds(self):
         with self.store.transaction():

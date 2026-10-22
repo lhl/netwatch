@@ -17,7 +17,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from autoprotect.core import BackendError, IndeterminateError, PolicyError, ValidationError, canonical, digest, load_json
+from autoprotect.core import AutoprotectError, BackendError, IndeterminateError, PolicyError, ValidationError, canonical, digest, load_json
 from autoprotect.engine import Engine, validate_policy
 from autoprotect.inventory import normalize_inventory
 from autoprotect.store import Store
@@ -310,7 +310,7 @@ class EngineTests(unittest.TestCase):
         self.assertFalse(self.backend.gate.exists())
         self.assertEqual(self.engine.queue()[0]["status"], "succeeded")
         findings = self.engine.triage("fixture-host")
-        self.assertEqual(next(r for r in findings if r["advisory_id"])["status"], "not_affected")
+        self.assertEqual(next(r for r in findings if r["advisory_ids"])["status"], "not_affected")
         self.assertTrue(any(row["status"] == "unknown" for row in findings))
         with self.assertRaises(PolicyError):
             self.engine.execute(plan["id"])
@@ -344,6 +344,84 @@ class EngineTests(unittest.TestCase):
         self.assertNotIn("apply", self.backend.calls)
         self.assertEqual(sum(row["event"] == "action-denied" for row in self.engine.audit()), 3)
 
+    def test_retention_keeps_plan_evidence_and_prunes_superseded_snapshots(self):
+        plan = self.prepare()
+        planned_source = plan["body"]["source_digest"]
+        self.at += 1
+        self.engine.ingest("debian", source("Second snapshot"))
+        self.at += 1
+        third = self.engine.ingest("debian", source("Third snapshot"))
+        objects = {row[0] for row in self.store.connection.execute("SELECT id FROM objects WHERE kind='source'")}
+        # The plan's evidence and the head survive; the unreferenced middle snapshot does not.
+        self.assertEqual(objects, {planned_source, third["snapshot_id"]})
+        self.assertEqual(self.store.finding(plan["body"]["finding_id"])["id"], plan["body"]["finding_id"])
+        self.assertEqual(self.store.get("inventory", plan["body"]["inventory_id"])["asset_id"], "fixture-host")
+        pruned = [row["details"] for row in self.engine.audit() if row["event"] == "evidence-pruned"]
+        self.assertTrue(pruned and all(set(row) == {"source", "findings", "inventory"} for row in pruned))
+
+    def test_repeated_triage_does_not_accumulate_findings_sets(self):
+        self.engine.ingest("debian", source())
+        for _ in range(3):
+            self.at += 1
+            self.engine.inventory()
+            self.engine.triage("fixture-host")
+        count = self.store.connection.execute("SELECT COUNT(*) FROM objects WHERE kind='findings'").fetchone()[0]
+        self.assertEqual(count, 1)
+        inventories = self.store.connection.execute("SELECT COUNT(*) FROM objects WHERE kind='inventory'").fetchone()[0]
+        self.assertEqual(inventories, 1)
+
+    def test_triage_persists_only_plannable_findings_and_records_provenance(self):
+        self.engine.ingest("debian", source())
+        self.engine.inventory()
+        findings = self.engine.triage("fixture-host")
+        affected = [row for row in findings if row["status"] == "affected"]
+        self.assertTrue(affected and len(affected) < len(findings))
+        self.assertTrue(all(row["evidence_acquisition"] == "import" for row in affected))
+        stored = self.store.get("findings", self.store.connection.execute("SELECT id FROM objects WHERE kind='findings'").fetchone()[0])
+        self.assertEqual(stored["findings"], affected)
+        self.assertEqual(self.engine.poll("debian")["acquisition"], "https")
+        polled = self.engine.triage("fixture-host")
+        self.assertTrue(all(row["evidence_acquisition"] == "https" for row in polled if row["advisory_ids"]))
+
+    def test_poll_discards_a_response_when_the_head_changes_during_fetch(self):
+        self.engine.poll("debian")
+        before = self.store.source_health("debian")
+        def fetch(source_name, etag=None):
+            self.engine.ingest("debian", source("Concurrent import"))
+            return {"not_modified": False, "raw": source("Older poll response"), "etag": '"late"'}
+        self.engine._fetcher = fetch
+        with self.assertRaisesRegex(AutoprotectError, "changed during this poll"):
+            self.engine.poll("debian")
+        head = self.store.source_health("debian")
+        self.assertEqual(head["acquisition"], "import")
+        self.assertEqual(head["revision"], before["revision"] + 1)
+        self.assertIsNone(head["error"])
+        self.assertEqual(self.engine.audit()[-1]["details"]["reason"], "source head changed concurrently")
+
+    def test_read_only_commands_do_not_wait_for_a_running_writer(self):
+        self.prepare()
+        other = Store(Path(self.temp.name) / "main.db")
+        self.addCleanup(other.close)
+        with other.transaction():
+            other.event(self.at, "synthetic-writer", {})
+            self.assertTrue(self.engine.queue())
+            self.assertTrue(self.engine.audit())
+
+    def test_pre_grouping_plans_and_findings_become_stale_not_errors(self):
+        plan = self.prepare()
+        legacy = {key: value for key, value in plan["body"].items() if key != "advisory_ids"}
+        legacy["advisory_id"] = plan["body"]["advisory_ids"][0]
+        with self.store.transaction():
+            legacy_plan = self.store.save_plan(legacy)["id"]
+            row = {"asset_id": "fixture-host", "status": "affected", "advisory_id": "CVE-2026-10001"}
+            row = {"id": digest(row), **row}
+            self.store.save_findings({"inventory_id": None, "source_digest": None, "findings": [row]})
+        with self.assertRaisesRegex(PolicyError, "predates"):
+            self.engine.approve(legacy_plan, "operator")
+        self.assertEqual(self.store.plan(legacy_plan)["status"], "stale")
+        with self.assertRaisesRegex(PolicyError, "predates"):
+            self.engine.plan(row["id"])
+
     def test_static_policy_snapshot_is_rejected(self):
         with self.assertRaisesRegex(ValidationError, "callable"):
             Engine(self.store, self.policy, self.backend)
@@ -370,11 +448,15 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(imported["snapshot_id"], same["snapshot_id"])
         https = self.engine.poll("debian")
         self.assertNotEqual(https["snapshot_id"], imported["snapshot_id"])
-        self.assertEqual(self.store.get("source", imported["snapshot_id"])["acquisition"], "import")
+        # The replaced import is unreferenced evidence, so it is pruned and audited.
+        with self.assertRaisesRegex(ValidationError, "does not exist"):
+            self.store.get("source", imported["snapshot_id"])
+        self.assertTrue(any(row["event"] == "evidence-pruned" for row in self.engine.audit()))
         again = self.engine.ingest("debian", source())
         self.assertEqual(again["snapshot_id"], imported["snapshot_id"])
         self.assertIsNone(again["etag"])
-        self.assertEqual(self.store.get("source", https["snapshot_id"])["acquisition"], "https")
+        with self.assertRaisesRegex(ValidationError, "does not exist"):
+            self.store.get("source", https["snapshot_id"])
 
     def test_304_requires_same_source_https_snapshot_and_refreshes_only_contact(self):
         self.response = {"not_modified": True, "raw": None, "etag": '"first"'}
@@ -470,7 +552,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result["incidents"][0]["summary"], "hostile\x1b[31m")
         self.assertEqual(result["incidents"][0]["fixed_versions"], ["curl attacker | sh"])
         self.assertNotIn("\x1b", canonical(result))
-        with self.assertRaises(PolicyError):
+        # Only affected findings are persisted as plannable evidence.
+        with self.assertRaisesRegex(ValidationError, "not plannable"):
             self.engine.plan(result["findings"][0]["id"])
 
     def test_feed_error_does_not_clear_findings_or_claim_unaffected(self):
@@ -999,7 +1082,7 @@ class EngineTests(unittest.TestCase):
                 self.engine.resolve_recovery(plan["id"], "op", "Cannot attest while active")
 
     def test_review_final_matching_cannot_outlive_plan_approval_feed_or_inventory(self):
-        from autoprotect.engine import match as original_match
+        from autoprotect.engine import verify_affected as original_match
         for deadline in ("plan_ttl", "approval_ttl", "max_feed_age", "max_inventory_age"):
             with self.subTest(deadline=deadline):
                 self.policy = policy()
@@ -1016,7 +1099,7 @@ class EngineTests(unittest.TestCase):
                             self.at += 6
                     return result
                 self.backend.calls.clear()
-                with patch("autoprotect.engine.match", matching):
+                with patch("autoprotect.engine.verify_affected", matching):
                     result = self.engine.execute(plan["id"])
                 self.assertEqual(calls, 2)
                 self.assertEqual(result["status"], "failed")
@@ -1025,7 +1108,7 @@ class EngineTests(unittest.TestCase):
                 self.at += 1
 
     def test_review_final_clock_rechecks_the_independent_preflight_observation(self):
-        from autoprotect.engine import match as original_match
+        from autoprotect.engine import verify_affected as original_match
         self.policy.update(plan_ttl=1000, approval_ttl=1000, max_feed_age=1000, max_inventory_age=5)
         plan = self.prepare()
         original_inspect = self.backend.inspect
@@ -1042,14 +1125,14 @@ class EngineTests(unittest.TestCase):
                 if calls == 2:
                     self.at += 2  # Head remains fresh; the independently collected preflight is now stale.
             return result
-        with patch.object(self.backend, "inspect", inspect), patch("autoprotect.engine.match", matching):
+        with patch.object(self.backend, "inspect", inspect), patch("autoprotect.engine.verify_affected", matching):
             result = self.engine.execute(plan["id"])
         self.assertEqual(result["status"], "failed")
         self.assertEqual(calls, 2)
         self.assertNotIn("write", self.backend.calls)
 
     def test_review_final_matching_cannot_keep_revoked_policy_authority(self):
-        from autoprotect.engine import match as original_match
+        from autoprotect.engine import verify_affected as original_match
         plan = self.prepare()
         calls = 0
         def matching(*args, **kwargs):
@@ -1060,7 +1143,7 @@ class EngineTests(unittest.TestCase):
                 if calls == 2:
                     self.policy["mode"] = "observe"
             return result
-        with patch("autoprotect.engine.match", matching):
+        with patch("autoprotect.engine.verify_affected", matching):
             result = self.engine.execute(plan["id"])
         self.assertEqual(calls, 2)
         self.assertEqual(result["status"], "failed")

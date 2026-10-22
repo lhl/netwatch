@@ -54,7 +54,7 @@ class NativePipelineTests(unittest.TestCase):
         self.engine.poll("debian")
         self.engine.inventory()
         rows = self.engine.triage("synthetic-host")
-        finding = next(row for row in rows if row["advisory_id"] == "CVE-2026-10001")
+        finding = next(row for row in rows if "CVE-2026-10001" in row["advisory_ids"])
         self.plan = self.engine.plan(finding["id"])
         self.runner.commands.clear()
         self.runner.events.clear()
@@ -130,7 +130,7 @@ class NativePipelineTests(unittest.TestCase):
         self.plan = self.engine.plan(self.plan["body"]["finding_id"])
         self.approve()
         original_apply = self.backend.apply
-        original_match = engine_module.match
+        original_match = engine_module.verify_affected
         matches = []
 
         def slow_match(*args, **kwargs):
@@ -142,7 +142,7 @@ class NativePipelineTests(unittest.TestCase):
 
         def apply(target, policy, *, before_mutation):
             def callback():
-                with patch.object(engine_module, "match", side_effect=slow_match):
+                with patch.object(engine_module, "verify_affected", side_effect=slow_match):
                     before_mutation()
             return original_apply(target, policy, before_mutation=callback)
 

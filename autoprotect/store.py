@@ -1,19 +1,32 @@
 """SQLite persistence for content identities and the serialized local lifecycle.
 
-Callers must use transaction() for writes. Hashes detect corruption, not a writer
-who controls this database. Approval actor labels are not authentication.
+Callers must use transaction() for writes and read() for consistent read-only
+views. Hashes detect corruption, not a writer who controls this database.
+Approval actor labels are not authentication. Plans, approvals, outcomes and
+audit events are never deleted. Source snapshots, findings sets and inventories
+are retained while a head, plan, outcome or current findings set references
+them; prune() removes the rest so repeated polling and triage stay bounded.
 """
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from contextlib import contextmanager
+import json
 import re
 import sqlite3
 
 from .core import AutoprotectError, PolicyError, ValidationError, canonical, digest, identifier, integer, load_json
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+_PRUNABLE = ("source", "findings", "inventory")
+_EXPECTED_TABLES = {"objects", "source_health", "inventory_heads", "finding_index", "finding_sets", "plan_status",
+                    "approval_heads", "outcomes", "audit"}
+# Verified canonical text for large immutable objects. Byte-identical rows are
+# re-parsed without repeating validation/hashing; any difference re-verifies.
+_VERIFIED_CACHE = 4
+_VERIFIED_MIN_BYTES = 64 * 1024
 _KINDS = {"source", "inventory", "findings", "plan", "approval"}
 FINAL_STATUSES = frozenset({"succeeded", "failed", "needs_attention", "stale"})
 _STATUSES = FINAL_STATUSES | {"pending", "approved", "executing"}
@@ -29,6 +42,7 @@ class Store:
     def __init__(self, path):
         self.connection = sqlite3.connect(str(path), timeout=5, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
+        self._verified = OrderedDict()
         try:
             self.connection.execute("PRAGMA foreign_keys = ON")
             self.connection.execute("PRAGMA busy_timeout = 5000")
@@ -38,15 +52,15 @@ class Store:
                 tables = self.connection.execute(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 ).fetchall()
-                if version != SCHEMA_VERSION:
+                names = {row[0] for row in tables}
+                if version == 2 and names == _EXPECTED_TABLES - {"finding_sets"}:
+                    self._migrate_from_2()
+                elif version != SCHEMA_VERSION:
                     if version != 0 or tables:
                         raise ValidationError("Unsupported store schema version; use a compatible application")
                     self._initialize()
-                else:
-                    expected = {"objects", "source_health", "inventory_heads", "finding_index", "plan_status",
-                                "approval_heads", "outcomes", "audit"}
-                    if {row[0] for row in tables} != expected:
-                        raise ValidationError("Store schema is incomplete or unsupported")
+                elif names != _EXPECTED_TABLES:
+                    raise ValidationError("Store schema is incomplete or unsupported")
         except BaseException:
             self.close()
             raise
@@ -67,6 +81,7 @@ class Store:
                       (backend IS NOT NULL AND target_generation IS NOT NULL)))""",
             """CREATE TABLE finding_index (
                 finding_id TEXT PRIMARY KEY, set_id TEXT NOT NULL REFERENCES objects(id))""",
+            self._FINDING_SETS,
             """CREATE TABLE plan_status (
                 plan_id TEXT PRIMARY KEY REFERENCES objects(id),
                 status TEXT NOT NULL CHECK(status IN ('pending','approved','executing','succeeded','failed','needs_attention','stale')))""",
@@ -83,10 +98,32 @@ class Store:
             self.connection.execute(statement)
         for table in ("objects", "outcomes", "audit"):
             for operation in ("UPDATE", "DELETE"):
+                if (table, operation) == ("objects", "DELETE"):
+                    self.connection.execute(self._OBJECT_DELETE)
+                    continue
                 self.connection.execute(
                     f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} "
                     "BEGIN SELECT RAISE(ABORT, 'immutable record'); END"
                 )
+        self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+    _FINDING_SETS = """CREATE TABLE finding_sets (
+        set_id TEXT PRIMARY KEY REFERENCES objects(id), inventory_id TEXT, source_digest TEXT)"""
+    # Plans and approvals are permanent. Evidence objects may be removed only
+    # through prune(), which first proves that nothing retained references them.
+    _OBJECT_DELETE = ("CREATE TRIGGER immutable_objects_delete BEFORE DELETE ON objects "
+                      "WHEN OLD.kind NOT IN ('source','findings','inventory') "
+                      "BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
+
+    def _migrate_from_2(self):
+        """Add findings-set metadata and evidence retention; keep every record."""
+        self.connection.execute(self._FINDING_SETS)
+        for (key,) in self.connection.execute("SELECT id FROM objects WHERE kind='findings'").fetchall():
+            body = self.get("findings", key)
+            self.connection.execute("INSERT INTO finding_sets VALUES (?,?,?)",
+                                    (key, body.get("inventory_id"), body.get("source_digest")))
+        self.connection.execute("DROP TRIGGER immutable_objects_delete")
+        self.connection.execute(self._OBJECT_DELETE)
         self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
@@ -101,6 +138,18 @@ class Store:
             if self.connection.in_transaction:
                 self.connection.execute("ROLLBACK")
             raise
+
+    @contextmanager
+    def read(self):
+        """A consistent deferred read view that does not block a running writer."""
+        if self.connection.in_transaction:
+            raise AutoprotectError("Nested store transactions are not supported")
+        self.connection.execute("BEGIN DEFERRED")
+        try:
+            yield self
+        finally:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
 
     def _writing(self):
         if not self.connection.in_transaction:
@@ -133,9 +182,17 @@ class Store:
         row = self.connection.execute("SELECT kind,body FROM objects WHERE id=?", (key,)).fetchone()
         if row is None or row["kind"] != kind:
             raise ValidationError("Requested immutable object does not exist with the expected kind")
-        body = load_json(row["body"], max_bytes=256 * 1024 * 1024, max_nodes=8_000_000)
+        raw = row["body"]
+        if self._verified.get(key) == raw:
+            self._verified.move_to_end(key)
+            return json.loads(raw)  # Exactly the canonical text verified below.
+        body = load_json(raw, max_bytes=256 * 1024 * 1024, max_nodes=8_000_000)
         if digest(body) != key:
             raise ValidationError("Immutable object failed its content hash check")
+        if len(raw) >= _VERIFIED_MIN_BYTES and canonical(body) == raw:
+            self._verified[key] = raw
+            while len(self._verified) > _VERIFIED_CACHE:
+                self._verified.popitem(last=False)
         return body
 
     def source_health(self, source):
@@ -207,6 +264,8 @@ class Store:
 
     def save_findings(self, body):
         key = self.put("findings", body)
+        self.connection.execute("INSERT OR IGNORE INTO finding_sets VALUES (?,?,?)",
+                                (key, body.get("inventory_id"), body.get("source_digest")))
         for finding in body["findings"]:
             if digest({k: v for k, v in finding.items() if k != "id"}) != finding["id"]:
                 raise ValidationError("Finding failed its content hash check")
@@ -217,7 +276,7 @@ class Store:
         content_id(key)
         row = self.connection.execute("SELECT set_id FROM finding_index WHERE finding_id=?", (key,)).fetchone()
         if row is None:
-            raise ValidationError("Finding does not exist; run triage first")
+            raise ValidationError("Finding does not exist or is not plannable; run triage first")
         body = self.get("findings", row[0])
         for finding in body["findings"]:
             if finding["id"] == key:
@@ -287,6 +346,55 @@ class Store:
         if digest(body) != row["digest"]:
             raise ValidationError("Execution outcome failed its content hash check")
         return body
+
+    def prune(self):
+        """Delete unreferenced evidence objects inside the caller's transaction.
+
+        Retained: source heads and every plan's source snapshot; findings sets
+        referenced by a plan, or built from a current inventory head and the
+        current Debian head; inventory heads and every inventory named by a
+        plan, outcome or retained findings set. Returns deleted counts by kind.
+        """
+        self._writing()
+        plans = [self.get("plan", row[0]) for row in self.connection.execute("SELECT plan_id FROM plan_status")]
+        keep_sources = {row[0] for row in self.connection.execute(
+            "SELECT snapshot_id FROM source_health WHERE snapshot_id IS NOT NULL")}
+        keep_sources |= {plan["source_digest"] for plan in plans if "source_digest" in plan}
+        heads = {row[0] for row in self.connection.execute("SELECT inventory_id FROM inventory_heads")}
+        debian = self.connection.execute("SELECT snapshot_id FROM source_health WHERE source='debian'").fetchone()
+        current_source = debian[0] if debian else None
+        keep_sets = set()
+        for plan in plans:
+            if "finding_id" in plan:
+                row = self.connection.execute("SELECT set_id FROM finding_index WHERE finding_id=?",
+                                              (plan["finding_id"],)).fetchone()
+                if row:
+                    keep_sets.add(row[0])
+        for set_id, inventory_id, source_digest in self.connection.execute(
+                "SELECT set_id, inventory_id, source_digest FROM finding_sets"):
+            if current_source is not None and source_digest == current_source and inventory_id in heads:
+                keep_sets.add(set_id)
+        keep_inventories = set(heads)
+        keep_inventories |= {plan["inventory_id"] for plan in plans if "inventory_id" in plan}
+        keep_inventories |= {row[0] for row in self.connection.execute(
+            "SELECT inventory_id FROM outcomes WHERE inventory_id IS NOT NULL")}
+        for set_id, inventory_id in self.connection.execute("SELECT set_id, inventory_id FROM finding_sets"):
+            if set_id in keep_sets and inventory_id is not None:
+                keep_inventories.add(inventory_id)
+        deleted = {}
+        candidates = {kind: [row[0] for row in self.connection.execute("SELECT id FROM objects WHERE kind=?", (kind,))]
+                      for kind in _PRUNABLE}
+        keep = {"source": keep_sources, "findings": keep_sets, "inventory": keep_inventories}
+        for kind in ("findings", "source", "inventory"):
+            doomed = [key for key in candidates[kind] if key not in keep[kind]]
+            for key in doomed:
+                if kind == "findings":
+                    self.connection.execute("DELETE FROM finding_index WHERE set_id=?", (key,))
+                    self.connection.execute("DELETE FROM finding_sets WHERE set_id=?", (key,))
+                self.connection.execute("DELETE FROM objects WHERE id=? AND kind=?", (key, kind))
+                self._verified.pop(key, None)
+            deleted[kind] = len(doomed)
+        return deleted
 
     def event(self, at, event, details):
         self._writing()

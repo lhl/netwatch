@@ -118,7 +118,7 @@ class CliTests(unittest.TestCase):
 
     def plan(self):
         rows = self.invoke("triage", ASSET)
-        finding = next(row for row in rows if row["advisory_id"] == CVE)
+        finding = next(row for row in rows if CVE in row["advisory_ids"])
         self.assertEqual(finding["status"], "affected")
         return self.invoke("plan", finding["id"])
 
@@ -157,7 +157,7 @@ class CliTests(unittest.TestCase):
         audit = self.invoke("audit")
         self.assertTrue(any(row["event"] == "plan-approved" for row in audit))
         findings = self.invoke("triage", ASSET)
-        self.assertEqual(next(row for row in findings if row["advisory_id"] == CVE)["status"], "not_affected")
+        self.assertEqual(next(row for row in findings if CVE in row["advisory_ids"])["status"], "not_affected")
 
     def test_auto_workflow_changes_state_without_approval(self):
         self.write_policy(mode="auto")
@@ -178,7 +178,7 @@ class CliTests(unittest.TestCase):
     def test_auto_allowlist_denial(self):
         self.write_policy(mode="auto", allowed_packages=["another-package"])
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
         self.invoke("plan", finding["id"], expected=1)
         self.assertEqual(self.invoke("queue"), [])
         self.assertEqual(self.invoke("inventory")["body"]["packages"][0]["version"], "1.0-1")
@@ -203,7 +203,7 @@ class CliTests(unittest.TestCase):
             context = store.inventory_context(ASSET)
             self.assertIsNone(context["backend"])
             self.assertIsNone(context["target_generation"])
-        finding = next(row for row in self.invoke("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
         self.invoke("plan", finding["id"], expected=1)
 
     def test_feed_cannot_supply_provenance_even_when_policy_is_native(self):
@@ -251,7 +251,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_reloaded_with_protected_loader_at_every_engine_request(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
         original = Simulator.resolve
         def change_policy(backend, *args):
             target = original(backend, *args)
@@ -268,7 +268,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_backend_cannot_change_under_constructed_backend(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
         original = Simulator.resolve
         def change_backend(backend, *args):
             target = original(backend, *args)
@@ -546,7 +546,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_reload_does_not_reuse_file_after_permissions_change(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
         original = Simulator.resolve
         def change_mode(backend, *args):
             result = original(backend, *args)
@@ -843,7 +843,7 @@ class CliTests(unittest.TestCase):
         command("init-simulator", "--inventory", self.inventory_path, "--catalog", self.catalog_path)
         command("import-feed", "debian", self.debian_path)
         command("inventory")
-        finding = next(row for row in command("triage", ASSET) if row["advisory_id"] == CVE)
+        finding = next(row for row in command("triage", ASSET) if CVE in row["advisory_ids"])
         plan = command("plan", finding["id"])
         command("execute", plan["id"], expected=1)
         command("approve", plan["id"], "--actor", "subprocess-operator")

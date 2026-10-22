@@ -1,8 +1,8 @@
 import copy
 import unittest
 
-from autoprotect.core import ValidationError, digest
-from autoprotect.matching import match
+from autoprotect.core import ValidationError, canonical, digest
+from autoprotect.matching import match, verify_affected
 
 
 def inventory_fixture():
@@ -115,7 +115,7 @@ class MatchingTests(unittest.TestCase):
             row.update(updates)
             result = self.run_match(assertions=[row])[0]
             self.assertEqual(result["status"], "unknown")
-            self.assertIsNone(result["advisory_id"])
+            self.assertEqual(result["advisory_ids"], [])
 
     def test_unsupported_ecosystem_stays_visible(self):
         inv = inventory_fixture()
@@ -178,7 +178,7 @@ class MatchingTests(unittest.TestCase):
             row.update(id="TEMP-0123456-ABCDEF", status=status, fixed_version=fixed)
             result = self.run_match(assertions=[row])[0]
             self.assertEqual(result["status"], "unknown")
-            self.assertEqual(result["advisory_id"], row["id"])
+            self.assertEqual(result["advisory_ids"], [row["id"]])
             self.assertIn("Temporary", result["reason"])
 
     def test_cumulative_correlation_and_output_bounds(self):
@@ -206,6 +206,91 @@ class MatchingTests(unittest.TestCase):
                      [{**incident_fixture(), "is_example": "false"}]):
             with self.assertRaises(ValidationError):
                 self.run_match(incidents=rows)
+
+    def test_package_level_outcomes_are_summarized_with_every_covered_advisory(self):
+        inv = inventory_fixture()
+        inv["packages"][0].update(version="2:1.0-2", source_version="2:1.0-2")
+        inv["packages"].append({**inv["packages"][0], "name": "libexample-dev"})
+        rows = [{**assertion_fixture(), "id": f"CVE-2026-{20000 + index}"} for index in range(3)]
+        rows.append({**assertion_fixture(), "id": "CVE-2026-29999", "fixed_version": "2:9.0-1"})
+        results = self.run_match(inv, rows)
+        summaries = [row for row in results if row["status"] == "not_affected"]
+        self.assertEqual(len(summaries), 2)
+        for summary in summaries:
+            self.assertEqual(summary["advisory_ids"], ["CVE-2026-20000", "CVE-2026-20001", "CVE-2026-20002"])
+            self.assertIsNone(summary["fixed_version"])
+            self.assertEqual(summary["priority"], 0)
+        affected = [row for row in results if row["status"] == "affected"]
+        self.assertEqual([row["advisory_ids"] for row in affected], [["CVE-2026-29999"]] * 2)
+        stale = self.run_match(inv, rows, now=2000)
+        self.assertEqual(len(stale), 2)
+        for row in stale:
+            self.assertEqual(row["status"], "unknown")
+            self.assertEqual(len(row["advisory_ids"]), 4)
+            self.assertIn("stale", row["reason"])
+            self.assertEqual(row["priority"], 80)
+
+    def test_large_multi_binary_source_history_stays_within_bounds(self):
+        # Shaped like Debian's linux source: tens of thousands of historical
+        # assertions shared by several installed binaries, nearly all fixed.
+        inv = inventory_fixture()
+        inv["packages"][0].update(version="2:5.0-1", source_version="2:5.0-1")
+        inv["packages"] += [{**inv["packages"][0], "name": f"libexample{index}"} for index in range(2, 7)]
+        rows = [{**assertion_fixture(), "id": f"CVE-2026-{100000 + index}", "fixed_version": "2:1.0-1+deb13u1"}
+                for index in range(20_000)]
+        rows += [{**assertion_fixture(), "id": f"CVE-2027-{100000 + index}", "status": "open", "fixed_version": None}
+                 for index in range(800)]
+        results = self.run_match(inv, rows)
+        self.assertEqual(sum(row["status"] == "not_affected" for row in results), 6)
+        self.assertEqual(sum(row["status"] == "affected" for row in results), 6)
+        self.assertTrue(all(len(row["advisory_ids"]) == 800 for row in results if row["status"] == "affected"))
+        self.assertLess(len(canonical(results)), 4 * 1024 * 1024)
+        # An outdated host: every historical fix applies. Rows follow distinct
+        # fixed versions (one upgrade decision each), not advisory count.
+        inv["packages"] = [{**row, "version": "2:0.1-1", "source_version": "2:0.1-1"} for row in inv["packages"]]
+        for index, row in enumerate(rows[:20_000]):
+            row["fixed_version"] = f"2:1.0-1+deb13u{index % 200}"
+        results = self.run_match(inv, rows)
+        self.assertEqual(sum(row["status"] == "affected" for row in results), 6 * 201)
+        self.assertLess(len(canonical(results)), 16 * 1024 * 1024)
+
+    def test_verify_affected_recomputes_one_verdict(self):
+        inv = inventory_fixture()
+        package = inv["packages"][0]
+        rows = [assertion_fixture()]
+        args = dict(package=package, advisory_ids=["CVE-2026-12345"], fixed_version="2:1.0-1+deb13u1", max_inventory_age=300)
+        self.assertTrue(verify_affected(inv, rows, **args))
+        self.assertFalse(verify_affected(inv, rows, **{**args, "fixed_version": "2:1.0-1+deb13u9"}))
+        self.assertFalse(verify_affected(inv, rows, **{**args, "advisory_ids": ["CVE-2026-99999"]}))
+        self.assertFalse(verify_affected(inv, rows, **{**args, "advisory_ids": []}))
+        # The group must match exactly: a second advisory fixed by the same
+        # version is part of the same remediation decision.
+        grouped = rows + [{**rows[0], "id": "CVE-2026-12346"}]
+        self.assertFalse(verify_affected(inv, grouped, **args))
+        self.assertTrue(verify_affected(inv, grouped, **{**args, "advisory_ids": ["CVE-2026-12345", "CVE-2026-12346"]}))
+        self.assertFalse(verify_affected(inv, rows, **{**args, "package": {**package, "version": "2:1.0-1+b5"}}))
+        self.assertFalse(verify_affected(inv, [{**rows[0], "status": "undetermined"}], **args))
+        self.assertFalse(verify_affected({**inv, "complete": False}, rows, **args))
+        self.assertFalse(verify_affected(inv, [{**rows[0], "release": "sid"}], **args))
+        fixed = copy.deepcopy(inv)
+        fixed["packages"][0].update(source_version="2:1.0-1+deb13u1")
+        self.assertFalse(verify_affected(fixed, rows, **{**args, "package": fixed["packages"][0]}))
+        with self.assertRaises(ValidationError):
+            verify_affected(inv, rows + [assertion_fixture()], **args)
+
+    def test_import_acquisition_is_recorded_on_findings(self):
+        inv = inventory_fixture()
+        rows = [assertion_fixture()]
+        imported = match(inv, rows, [], inventory_id=digest(inv), source_digest=digest(rows), now=1100,
+                         max_inventory_age=300, evidence_acquisition="import")[0]
+        self.assertEqual(imported["evidence_acquisition"], "import")
+        self.assertIn("imported", imported["reason"])
+        polled = self.run_match()[0]
+        self.assertIsNone(polled["evidence_acquisition"])
+        self.assertNotEqual(imported["id"], polled["id"])
+        with self.assertRaises(ValidationError):
+            match(inv, rows, [], inventory_id=digest(inv), source_digest=digest(rows), now=1100,
+                  max_inventory_age=300, evidence_acquisition="feed-link")
 
 
 if __name__ == "__main__":
