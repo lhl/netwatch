@@ -702,6 +702,10 @@ class FakeNativeRunner:
         self.evidence = {"target": self.target, "authenticated": True, "essential": False,
                          "relationships": {"Conflicts": "", "Breaks": "", "Replaces": ""},
                          "releases": [release_evidence()]}
+        self.config_report = {"config_digest": "c" * 64, "origins": [copy.deepcopy(ORIGIN)], "sources": [
+            {"uri": "http://deb.debian.org/debian/", "suite": "trixie", "components": ["main"],
+             "key": "/usr/share/keyrings/debian-archive-keyring.pgp", "key_sha256": "e" * 64,
+             "release": {"date": CLOCK - 100, "valid_until": None}}]}
         self.artifact = {"name": "widget", "architecture": "amd64", "version": self.target["to_version"],
                          "source_name": "widget-src", "source_version": self.target["source_version"],
                          "relationships": {"Conflicts": "", "Breaks": "", "Replaces": ""}, "essential": False}
@@ -741,6 +745,8 @@ class FakeNativeRunner:
                 return CommandResult(0, '{"downloaded":true}', "")
             if action == "artifact":
                 return CommandResult(0, canonical(self.artifact), "")
+            if action == "config":
+                return CommandResult(0, canonical(self.config_report), "")
         if argv[0] == "/usr/bin/apt-get":
             self.events.append("simulate")
             output = (f"Reading package lists...\nInst widget [1.0-1] ({self.target['to_version']} Debian:stable [amd64])\n"
@@ -786,6 +792,53 @@ class DebianAptTests(unittest.TestCase):
         with self.backend.lock("synthetic-host"):
             self.backend.begin(PLAN)
             return self.backend.apply(target(), self.pol, before_mutation=callback)
+
+    def test_settled_removed_and_foreign_architecture_packages_do_not_block(self):
+        # Typical real hosts: removed packages that kept configuration ("rc")
+        # and multiarch i386 libraries. Only unfinished dpkg work blocks.
+        base = self.runner.inventory
+        extra = [dict(base["packages"][1], name="removed-kept-config", status="deinstall-config-files"),
+                 dict(base["packages"][1], name="purged-pending", status="purge-config-files"),
+                 dict(base["packages"][1], name="libfoo1", architecture="i386"),
+                 dict(base["packages"][1], name="marked-for-removal", status="deinstall-installed")]
+        self.runner.inventory = normalize_inventory({**base, "packages": base["packages"] + extra}, collector="native")
+        def resolve():
+            inv = self.backend.inspect()
+            widget = next(row for row in inv["packages"] if row["name"] == "widget")
+            return self.backend.resolve(inv, dict(finding(inv), package=widget), self.pol)
+        self.assertEqual(resolve(), target())
+        result = self.execute()
+        self.assertTrue(result["verified_singleton"])
+        for status in ("half-configured", "unpacked", "reinstreq-installed", "triggers-pending", "half-installed"):
+            self.runner.inventory = normalize_inventory(
+                {**base, "packages": base["packages"] + [dict(base["packages"][1], name="busy", status=status)]},
+                collector="native")
+            with self.subTest(status=status), self.assertRaisesRegex(BackendError, "unfinished dpkg work"):
+                resolve()
+
+    def test_target_itself_must_be_fully_installed_amd64_or_all(self):
+        for change in ({"status": "deinstall-config-files"}, {"status": "deinstall-installed"}):
+            base = inventory("native")
+            base["packages"][1].update(change)
+            self.runner.inventory = normalize_inventory(base, collector="native")
+            inv = self.backend.inspect()
+            with self.subTest(change=change), self.assertRaisesRegex(BackendError, "fully installed"):
+                self.backend.resolve(inv, finding(inventory("native")), self.pol)
+
+    def test_configuration_report_is_validated_observation(self):
+        report = self.backend.configuration_report()
+        self.assertEqual(report["config_digest"], "c" * 64)
+        self.assertEqual(self.runner.commands[-1][0], ["/usr/bin/python3", "-I", backends._PROBE, "config"])
+        self.runner.config_report["origins"] = []
+        self.assertEqual(self.backend.configuration_report()["origins"], [])
+        for change in (lambda r: r.update(config_digest="bad"), lambda r: r.update(extra=True),
+                       lambda r: r["sources"][0].update(key_sha256="x"), lambda r: r.update(sources=[]),
+                       lambda r: r.update(origins=[{"origin": "bad value"}]),
+                       lambda r: r.update(origins=[dict(ORIGIN, site="has space")])):
+            self.runner.config_report = copy.deepcopy(FakeNativeRunner().config_report)
+            change(self.runner.config_report)
+            with self.subTest(change=change), self.assertRaises((BackendError, ValidationError)):
+                self.backend.configuration_report()
 
     def test_native_success_fixed_arguments_and_frontend_interval(self):
         self.assertEqual(self.resolve(), target())

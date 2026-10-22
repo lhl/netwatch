@@ -39,21 +39,47 @@ class SourceTests(unittest.TestCase):
         for option in ("trusted=yes", "allow-insecure=yes", "allow-weak=yes", "check-valid-until=no", "check-date=no", "arch=arm64"):
             with self.subTest(option=option), self.assertRaises(probe.ProbeError):
                 probe.parse_sources(SOURCE.replace("]", " " + option + "]"), deb822=False)
-        for extra in ("Trusted: yes", "Check-Valid-Until: no", "Allow-Insecure: yes", "Enabled: no", "Signed-By: /tmp/key.gpg"):
+        for extra in ("Trusted: yes", "Check-Valid-Until: no", "Allow-Insecure: yes", "Enabled: maybe", "Signed-By: /tmp/key.gpg"):
             content = f"Types: deb\nURIs: https://deb.example.invalid/debian\nSuites: trixie\nComponents: main\nSigned-By: {KEY}\n{extra}\n"
             with self.subTest(extra=extra), self.assertRaises(probe.ProbeError):
                 probe.parse_sources(content, deb822=True)
 
     def test_reject_unsigned_remote_or_ambiguous_source_selectors(self):
         cases = [SOURCE.replace(f"[arch=amd64 signed-by={KEY}] ", ""), SOURCE.replace(KEY, "/tmp/key.gpg"),
-                 SOURCE.replace(KEY, "/usr/share/keyrings/../key.gpg"), SOURCE.replace("https:", "http:"),
-                 SOURCE.replace("trixie", "stable"), SOURCE.replace("trixie", "sid"), SOURCE.replace("deb [", "deb-src ["),
+                 SOURCE.replace(KEY, "/usr/share/keyrings/../key.gpg"), SOURCE.replace("https:", "ftp:"),
+                 SOURCE.replace("invalid/", "invalid:8080/"), SOURCE.replace("https:", "http:").replace("invalid/", "invalid:443/"),
+                 SOURCE.replace("keyring.gpg", "keyring.key"),
+                 SOURCE.replace("trixie", "stable"), SOURCE.replace("trixie", "sid"), SOURCE.replace("deb [", "deb-src[ "),
                  SOURCE.replace("deb.example.invalid", "user:password@deb.example.invalid"),
                  SOURCE.replace("/debian trixie", "/debian?custom=yes trixie"),
                  SOURCE.replace(" main", " main;touch /tmp/unsafe"), SOURCE.replace("https:", "file:")]
         for content in cases:
             with self.subTest(content=content), self.assertRaises((probe.ProbeError, ValueError)):
                 probe.parse_sources(content, deb822=False)
+
+    def test_stock_trixie_sources_signed_http_pgp_keys_and_source_indexes(self):
+        # The shape Debian 13 installs: plain HTTP mirrors (authenticated by
+        # signed InRelease, not transport), a .pgp keyring and a comment.
+        stock = ("Types: deb\n# http://snapshot.debian.org/archive/debian/20261020T213255Z\n"
+                 "URIs: http://deb.debian.org/debian\nSuites: trixie trixie-updates\nComponents: main\n"
+                 "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n\n"
+                 "Types: deb\nURIs: http://deb.debian.org/debian-security\nSuites: trixie-security\n"
+                 "Components: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n")
+        entries = probe.parse_sources(stock, deb822=True)
+        self.assertEqual([(entry["uri"], entry["suite"]) for entry in entries], [
+            ("http://deb.debian.org/debian/", "trixie"), ("http://deb.debian.org/debian/", "trixie-updates"),
+            ("http://deb.debian.org/debian-security/", "trixie-security")])
+        self.assertTrue(all(entry["key"].endswith(".pgp") for entry in entries))
+        self.assertEqual(probe.parse_sources(SOURCE.replace("https:", "http:"), deb822=False)[0]["uri"],
+                         "http://deb.example.invalid/debian/")
+        self.assertEqual(probe.parse_sources(SOURCE.replace("deb [", "deb-src ["), deb822=False), [])
+        both = stock.replace("Types: deb\n", "Types: deb deb-src\n", 1)
+        self.assertEqual(probe.parse_sources(both, deb822=True), entries)
+        disabled = stock.replace("Types: deb\n", "Types: deb\nEnabled: no\n", 1)
+        self.assertEqual(len(probe.parse_sources(disabled, deb822=True)), 1)
+        for types in ("Types: deb-src deb-src\n", "Types: rpm\n", "Types:\n"):
+            with self.subTest(types=types), self.assertRaises(probe.ProbeError):
+                probe.parse_sources(stock.replace("Types: deb\n", types, 1), deb822=True)
 
     def test_control_duplicate_casefold_and_malformed_data(self):
         for raw in ("Package: widget\npackage: other\n", " continuation\n", "Malformed\n", "Package: widget\x00\n"):
@@ -165,6 +191,7 @@ class ConfigurationTests(unittest.TestCase):
         files = {aptdir / "sources.list": SOURCE.encode(), Path(KEY): b"synthetic key",
                  aptdir / "apt.conf": b'#include "/tmp/unfingerprinted.conf";'}
         with patch.object(probe, "_fingerprint_tree", return_value="c" * 64), \
+                patch.object(probe, "_resolve_key", side_effect=lambda key: key), \
                 patch.object(Path, "exists", lambda p: p in files), \
                 patch.object(probe, "_read", side_effect=lambda p, limit: files[p]):
             with self.assertRaisesRegex(probe.ProbeError, "includes"):
@@ -175,6 +202,100 @@ class ConfigurationTests(unittest.TestCase):
                 probe._configuration()
             files[Path("/etc/dpkg/dpkg.cfg")] = b"# normal defaults\nno-debsig\nlog /var/log/dpkg.log\n"
             self.assertEqual(probe._configuration(), ("c" * 64, SOURCES))
+            # Cloud images filter documentation payloads; that is not a force option.
+            files[Path("/etc/dpkg/dpkg.cfg")] += b"path-exclude=/usr/share/doc/*\npath-include /usr/share/doc/*/copyright\n"
+            self.assertEqual(probe._configuration(), ("c" * 64, SOURCES))
+            for line in (b"path-exclude=relative\n", b"force-unsafe-io\n", b"admindir=/tmp\n"):
+                with self.subTest(line=line), self.assertRaisesRegex(probe.ProbeError, "dpkg configuration"):
+                    files[Path("/etc/dpkg/dpkg.cfg")] = line
+                    probe._configuration()
+
+    def test_distribution_symlinks_inside_checked_roots_are_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(probe, "_OWNER", os.geteuid()):
+            root = Path(directory) / "etc"
+            (root / "origins").mkdir(parents=True)
+            root.chmod(0o755)
+            (root / "origins").chmod(0o755)
+            (root / "origins" / "debian").write_bytes(b"Vendor: Debian\n")
+            (root / "origins" / "default").symlink_to("debian")
+            (root / "keyring.pgp").write_bytes(b"key")
+            (root / "keyring.gpg").symlink_to("keyring.pgp")
+            (root / "linked-dir").symlink_to("origins")
+            first = probe._fingerprint_tree([root], limit=1000)
+            (root / "origins" / "default").unlink()
+            (root / "origins" / "default").symlink_to("keyring-other")
+            (root / "keyring-other").write_bytes(b"x")
+            with self.assertRaisesRegex(probe.ProbeError, "inside the checked"):
+                probe._fingerprint_tree([root], limit=1000)  # Dangling: origins/keyring-other does not exist.
+            (root / "origins" / "default").unlink()
+            (root / "origins" / "default").symlink_to("../keyring-other")
+            self.assertNotEqual(probe._fingerprint_tree([root], limit=1000), first)
+            outside = Path(directory) / "outside"
+            outside.write_bytes(b"unchecked")
+            (root / "escape").symlink_to(outside)
+            with self.assertRaisesRegex(probe.ProbeError, "inside the checked"):
+                probe._fingerprint_tree([root], limit=1000)
+            (root / "escape").unlink()
+            (root / "dangling").symlink_to("missing")
+            with self.assertRaisesRegex(probe.ProbeError, "inside the checked"):
+                probe._fingerprint_tree([root], limit=1000)
+        with tempfile.TemporaryDirectory() as directory, patch.object(probe, "_OWNER", os.geteuid() + 1):
+            root = Path(directory)
+            root.chmod(0o755)
+            (root / "target").write_bytes(b"x")
+            (root / "link").symlink_to("target")
+            with self.assertRaises(probe.ProbeError):
+                probe._safe_link(root / "link", [root])
+
+    def test_signed_by_alias_resolves_only_within_keyring_directories(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(probe, "_OWNER", os.geteuid()):
+            keyrings, other = Path(directory) / "keyrings", Path(directory) / "other"
+            keyrings.mkdir()
+            other.mkdir()
+            (keyrings / "archive.pgp").write_bytes(b"key")
+            (keyrings / "archive.gpg").symlink_to("archive.pgp")
+            (other / "evil.pgp").write_bytes(b"key")
+            (keyrings / "evil.gpg").symlink_to(other / "evil.pgp")
+            (keyrings / "renamed.gpg").symlink_to("archive.pgp.bak")
+            (keyrings / "archive.pgp.bak").write_bytes(b"key")
+            with patch.object(probe, "KEYRING_DIRECTORIES", (keyrings,)):
+                self.assertEqual(probe._resolve_key(str(keyrings / "archive.gpg")), str(keyrings / "archive.pgp"))
+                self.assertEqual(probe._resolve_key(str(keyrings / "archive.pgp")), str(keyrings / "archive.pgp"))
+                for name in ("evil.gpg", "renamed.gpg"):
+                    with self.subTest(name=name), self.assertRaises(probe.ProbeError):
+                        probe._resolve_key(str(keyrings / name))
+
+
+class ConfigReportTests(unittest.TestCase):
+    def test_report_lists_reviewable_inputs_and_signed_origins_without_approval(self):
+        config = FakeConfig()
+        apt_pkg = SimpleNamespace(init_config=Mock(), config=config,
+                                  uri_to_filename=lambda uri: uri.removeprefix("https://").replace("/", "_"))
+        sources = [dict(SOURCES[0], components=["main", "contrib"]),
+                   {"uri": "https://security.example.invalid/debian-security/", "suite": "trixie-security",
+                    "components": ["main"], "key": KEY}]
+        fields = {"origin": "Debian", "label": "Debian", "suite": "stable", "codename": "trixie",
+                  "date": "Thu, 15 Jan 2026 12:00:00 UTC"}
+        def signed(_apt_pkg, source):
+            if source["suite"] == "trixie-security":
+                raise FileNotFoundError("no local index yet")
+            return fields
+        with patch.object(probe, "_configuration", return_value=("c" * 64, sources)), \
+                patch.object(probe, "_read", return_value=b"public key bytes"), \
+                patch.object(probe, "_signed_release", side_effect=signed):
+            report = probe._config_report(apt_pkg)
+        self.assertEqual(set(report), {"config_digest", "sources", "origins"})
+        self.assertEqual(report["config_digest"], "c" * 64)
+        self.assertEqual(report["sources"][0]["key_sha256"], probe.hashlib.sha256(b"public key bytes").hexdigest())
+        self.assertEqual(report["sources"][0]["release"], {"date": 1_768_478_400, "valid_until": None})
+        self.assertIn("missing", report["sources"][1]["release"])
+        self.assertEqual(report["origins"], sorted([dict(ORIGIN, component="contrib"), ORIGIN], key=probe._canonical))
+        apt_pkg.init_config.assert_called_once()
+
+    def test_report_rejects_unsafe_effective_configuration(self):
+        apt_pkg = SimpleNamespace(init_config=Mock(), config=FakeConfig({"Acquire::AllowInsecureRepositories": "1"}))
+        with patch.object(probe, "_configuration", return_value=("c" * 64, SOURCES)), self.assertRaises(probe.ProbeError):
+            probe._config_report(apt_pkg)
 
 
 class SignedIndexTests(unittest.TestCase):

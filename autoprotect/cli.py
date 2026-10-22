@@ -115,6 +115,8 @@ def _parser():
     commands.add_parser("queue", help="show persisted plans and their status")
     commands.add_parser("audit", help="show persisted audit events")
     commands.add_parser("demo", help="run isolated simulation; accepts no operational global options")
+    commands.add_parser("native-config", help="report local APT configuration digest, sources and signed origins "
+                                              "for review; approves nothing and accepts no global options")
     return parser
 
 
@@ -243,6 +245,20 @@ def _operate(args):
         return _dispatch(Engine(store, provider, backend), args, data)
 
 
+def _native_config():
+    """Read-only observation of the local APT inputs a native policy would bind.
+
+    The report is evidence for an administrator's independent review, never an
+    approval: nothing here writes policy or state, and copying a digest that
+    was not reviewed would defeat the configuration binding.
+    """
+    report = DebianApt().configuration_report()
+    return {"kind": "native-configuration-observation", "approved": False,
+            "warning": ("Observation only. Review every source, key file digest and origin independently before "
+                        "copying config_digest into approved_config_digest or origins into allowed_origins."),
+            **report}
+
+
 def _error(code, message, status):
     # Exception messages from our runtime are operator-facing. Bound them and
     # escape even lone surrogates in argv; never stringify OS/subprocess errors.
@@ -258,11 +274,14 @@ def main(argv=None):
     """Return a process exit code; help/version are the only plain-text output."""
     try:
         args = _parser().parse_args(argv)
-        if args.command == "demo":
+        if args.command in ("demo", "native-config"):
             if args.state_dir is not None or args.policy is not None or args.live:
-                raise _ArgumentError("demo accepts no --state-dir, --policy or --live options")
-            from .demo import run_demo
-            result = run_demo()
+                raise _ArgumentError(f"{args.command} accepts no --state-dir, --policy or --live options")
+            if args.command == "demo":
+                from .demo import run_demo
+                result = run_demo()
+            else:
+                result = _native_config()
         else:
             if args.state_dir is None or args.policy is None:
                 raise _ArgumentError("Operational commands require --state-dir DIR and --policy FILE before the command")

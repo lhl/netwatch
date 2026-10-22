@@ -58,8 +58,8 @@ def verify_demo(result):
 
 
 def main():
-    if sys.version_info[:2] != (3, 12):
-        raise RuntimeError("Packaging check requires the supported Python 3.12 runtime")
+    if sys.version_info < (3, 12):
+        raise RuntimeError("Packaging check requires a supported Python 3.12 or newer runtime")
     with tempfile.TemporaryDirectory(prefix="autoprotect-package-") as directory:
         root = Path(directory)
         snapshot = root / "source"

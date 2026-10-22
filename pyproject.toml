@@ -7,7 +7,7 @@ name = "autoprotect"
 version = "0.1.0"
 description = "Local security-advisory triage and policy-authorized remediation"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]

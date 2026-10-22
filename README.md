@@ -17,7 +17,7 @@ The research in [SOURCES.md](docs/SOURCES.md) distinguishes incident claims from
 
 ## Run the demo
 
-Use Linux and **Python 3.12** from the repository root. The package has no third-party Python runtime dependencies. No network access, installation or administrator privilege is needed for this command:
+Use Linux and **Python 3.12 or newer** from the repository root. The package has no third-party Python runtime dependencies. No network access, installation or administrator privilege is needed for this command:
 
 ```bash
 python3 -B -m autoprotect demo
@@ -39,9 +39,9 @@ For individual commands, follow the tested [manual and automatic simulator walkt
 
 ## Install locally
 
-The application requires Python `>=3.12,<3.13`. Building from source requires **setuptools 83.0.0**; virtual-environment creation requires Python's `venv` and `ensurepip` support. Native system prerequisites are separate from these Python dependencies.
+The application requires Python `>=3.12` (Debian 13 ships 3.13). Building from source requires **setuptools 83.0.0**; virtual-environment creation requires Python's `venv` and `ensurepip` support. Native system prerequisites are separate from these Python dependencies.
 
-With that build backend already available in your Python 3.12 environment, build and install without consulting a package index:
+With that build backend already available in your Python environment, build and install without consulting a package index:
 
 ```bash
 python3 -c "from setuptools.build_meta import build_wheel; build_wheel('dist')"
@@ -103,7 +103,7 @@ A recovery command can complete with exit `0` while the original plan remains `n
 
 ## Native execution boundary
 
-Native mutation and recovery-lock commands require explicit `--live`, effective root, protected root-owned policy/state, fresh native inventory, HTTPS-acquired Debian assertions, exact package/asset/repository allowlists and a reviewed APT configuration fingerprint. Policies must explicitly acknowledge maintainer scripts, recovery preparation and trusted installed lineage. These are administrator assertions, not verified backups or authentication of installed bytes.
+Native mutation and recovery-lock commands require explicit `--live`, effective root, protected root-owned policy/state, fresh native inventory, HTTPS-acquired Debian assertions, exact package/asset/repository allowlists and a reviewed APT configuration fingerprint. `autoprotect native-config` prints the host's configuration digest, sources, key-file digests and signed origins as read-only input to that review; it approves nothing. Policies must explicitly acknowledge maintainer scripts, recovery preparation and trusted installed lineage. These are administrator assertions, not verified backups or authentication of installed bytes.
 
 Only a single-package, increasing-version transaction with no extra package changes is supported. Sensitive packages, unsupported repositories, dependency changes, holds and uncertain package states are rejected. Do not loosen these checks to make an unsupported update execute. See [native prerequisites and rollout gates](docs/OPERATIONS.md) before considering a separately authorized disposable-Debian exercise.
 

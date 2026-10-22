@@ -82,6 +82,14 @@ def _target(data):
     return result
 
 
+# Settled dpkg states that do not interrupt another package's installation:
+# installed (wanted or held), and removed packages that kept configuration
+# files ("rc"). Unpacked, half-installed/configured, trigger-pending and
+# reinstall-required states mean dpkg has unfinished work and block mutation.
+_SETTLED_STATES = frozenset({"installed", "deinstall-installed", "purge-installed",
+                             "deinstall-config-files", "purge-config-files", "unknown-config-files"})
+
+
 def _ready(inventory, collector):
     if not isinstance(inventory, dict) or inventory.get("collector") != collector:
         raise BackendError("inventory collector does not match the backend")
@@ -92,16 +100,18 @@ def _ready(inventory, collector):
         raise BackendError("backend supports only Debian trixie on amd64")
     if not inventory["complete"] or not inventory["packages"]:
         raise BackendError("complete nonempty inventory is required")
-    if any(p["ecosystem"] != "deb" or p["status"] != "installed"
-           or p["architecture"] not in ("amd64", "all") for p in inventory["packages"]):
-        raise BackendError("inventory contains unsupported or non-ready package state")
+    # Foreign-architecture (multiarch) packages may be present; only the target
+    # must be amd64/all and fully installed, which _package/_policy enforce.
+    if any(p["ecosystem"] != "deb" or p["status"] not in _SETTLED_STATES for p in inventory["packages"]):
+        raise BackendError("inventory contains unsupported packages or unfinished dpkg work")
     return normalized
 
 
 def _package(inventory, name, architecture):
     matches = [p for p in inventory["packages"] if (p["name"], p["architecture"]) == (name, architecture)]
-    if len(matches) != 1 or matches[0]["held"]:
-        raise BackendError("target must be uniquely installed and not held")
+    if (len(matches) != 1 or matches[0]["held"] or matches[0]["status"] != "installed"
+            or architecture not in ("amd64", "all")):
+        raise BackendError("target must be a uniquely and fully installed amd64/all package that is not held")
     return matches[0]
 
 
@@ -150,12 +160,23 @@ def _replacement(inventory, target):
 
 
 def _check_release_times(constraints, max_age):
-    """Check retained, validated bounds only; no I/O or candidate recomputation."""
+    """Check retained, validated bounds only; no I/O or candidate recomputation.
+
+    Every contributing Release must be no older than max_repository_age, and
+    any Valid-Until must still be in the future. Debian's stable suite has no
+    Valid-Until and changes its Date only at point releases, so policies that
+    accept candidates from it need an age bound spanning a release cycle;
+    suites with Valid-Until (updates, security) remain bounded by expiry.
+    """
     timestamp = integer(now(), "current repository-check time")
     for date, expiry in constraints:
-        if (date > timestamp or timestamp - date > max_age
-                or (expiry is not None and (expiry <= timestamp or expiry <= date))):
-            raise BackendError("repository metadata is stale, future-dated or expired")
+        if date > timestamp:
+            raise BackendError("repository metadata is stale, future-dated or expired: Release Date is in the future")
+        if expiry is not None and (expiry <= timestamp or expiry <= date):
+            raise BackendError("repository metadata is stale, future-dated or expired: Release Valid-Until has passed")
+        if timestamp - date > max_age:
+            raise BackendError("repository metadata is stale, future-dated or expired: Release Date is older than "
+                               "max_repository_age (stable suites change Date only at point releases)")
 
 
 def _release_constraints(target, releases, policy):
@@ -651,6 +672,28 @@ class DebianApt(_Gated):
             return load_json(result.stdout, max_bytes=4 * 1024 * 1024)
         except ValidationError as exc:
             raise BackendError("APT probe returned invalid bounded metadata") from exc
+
+    def configuration_report(self):
+        """Observe effective APT inputs for administrator review; approves nothing."""
+        data = self._probe("config")
+        if not isinstance(data, dict) or set(data) != {"config_digest", "sources", "origins"}:
+            raise BackendError("APT probe returned an unsupported configuration report")
+        _hash(data["config_digest"], "configuration digest")
+        if not isinstance(data["sources"], list) or not 1 <= len(data["sources"]) <= 64:
+            raise BackendError("APT configuration report has an unsupported source list")
+        for source in data["sources"]:
+            if (not isinstance(source, dict)
+                    or set(source) != {"uri", "suite", "components", "key", "key_sha256", "release"}):
+                raise BackendError("APT configuration report has an unsupported source record")
+            _hash(source["key_sha256"], "key digest")
+        origins = data["origins"]
+        if not isinstance(origins, list) or len(origins) > 256 or any(
+                not isinstance(origin, dict) or set(origin) != _ORIGIN_FIELDS
+                or any(not isinstance(value, str) or not 1 <= len(value) <= 256
+                       or any(not 33 <= ord(c) <= 126 for c in value) for value in origin.values())
+                for origin in origins):
+            raise BackendError("APT configuration report has unsupported origin records")
+        return data
 
     def _candidate(self, inventory, package, fixed, policy):
         data = self._probe("resolve", package["name"], package["architecture"])

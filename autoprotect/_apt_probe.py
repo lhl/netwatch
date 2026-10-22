@@ -2,8 +2,10 @@
 
 Run only through DebianApt's fixed argument arrays. python3-apt is imported in
 main, never at module import. This helper does not refresh indexes or install
-packages. It supports HTTPS deb sources with explicit Signed-By key files,
-fixed Debian codenames and the standard APT/dpkg filesystem locations.
+packages. It supports HTTP or HTTPS deb sources with explicit Signed-By key
+files, fixed Debian codenames and the standard APT/dpkg filesystem locations.
+Transport is not the authority: every candidate requires a signed InRelease,
+matching Packages hashes and the exact artifact hash.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ MAX_KEYRING = 4 * 1024 * 1024
 MAX_RELEASES = 1024
 CODENAMES = {"trixie", "trixie-updates", "trixie-security"}
 ORIGIN_FIELDS = ("origin", "label", "archive", "codename", "component", "site")
+KEYRING_DIRECTORIES = (Path("/usr/share/keyrings"), Path("/etc/apt/keyrings"))
+# Required owner of every trusted APT/dpkg input. Tests substitute the invoking
+# user to exercise real filesystem checks; the probe itself never changes it.
+_OWNER = 0
 
 
 class ProbeError(Exception):
@@ -45,9 +51,43 @@ def _digest(value):
 def _safe_info(path, *, directory=False):
     info = path.lstat()
     if ((not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode))
-            or info.st_uid != 0 or info.st_mode & 0o022 or (not directory and info.st_nlink != 1)):
+            or info.st_uid != _OWNER or info.st_mode & 0o022 or (not directory and info.st_nlink != 1)):
         raise ProbeError("APT inputs must be root-owned regular files and directories without writable aliases")
     return info
+
+
+def _contained(path, roots):
+    return any(path == root or root in path.parents for root in roots)
+
+
+def _safe_link(path, roots):
+    """Accept a root-owned symlink only if it resolves inside a checked root.
+
+    Debian ships such links (for example /etc/dpkg/origins/default and the
+    debian-archive-keyring *.gpg -> *.pgp aliases). The link text is part of
+    the fingerprint; its target is fingerprinted as an ordinary entry of the
+    same tree, so a link can never import unchecked bytes.
+    """
+    info = path.lstat()
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != _OWNER:
+        raise ProbeError("APT input links must be root-owned symbolic links")
+    target = Path(os.path.realpath(path))
+    if not _contained(target, roots) or not target.exists():
+        raise ProbeError("APT input links must resolve inside the checked configuration roots")
+    _safe_info(target, directory=target.is_dir())
+    return os.readlink(path)
+
+
+def _resolve_key(key):
+    """Return the regular key file named by Signed-By, following safe aliases."""
+    path = Path(key)
+    if stat.S_ISLNK(path.lstat().st_mode):
+        _safe_link(path, KEYRING_DIRECTORIES)
+        path = Path(os.path.realpath(path))
+        if path.parent not in KEYRING_DIRECTORIES or not re.fullmatch(r"[A-Za-z0-9_.+-]+\.(?:gpg|pgp|asc)", path.name):
+            raise ProbeError("APT key aliases must resolve to a key file in an approved keyring directory")
+    _safe_info(path)
+    return str(path)
 
 
 def _read(path, limit):
@@ -71,13 +111,19 @@ def _fingerprint_tree(roots, *, limit, skip=()):
             continue
         _safe_info(root, directory=True)
         for directory, dirs, files in os.walk(root, followlinks=False):
-            dirs[:] = sorted(d for d in dirs if d not in skip)
+            links = sorted(d for d in dirs if d not in skip and (Path(directory) / d).is_symlink())
+            dirs[:] = sorted(d for d in dirs if d not in skip and d not in links)
             for name in dirs:
                 _safe_info(Path(directory) / name, directory=True)
-            for name in sorted(files):
+            for name in sorted(files + links):
                 if name in skip:
                     continue
                 path = Path(directory) / name
+                if path.is_symlink():
+                    if len(records) >= 10000:
+                        raise ProbeError("APT configuration or indexes exceed their aggregate limit")
+                    records.append([str(path), "link", _safe_link(path, roots)])
+                    continue
                 info = _safe_info(path)
                 total += info.st_size
                 if total > limit or len(records) >= 10000:
@@ -134,17 +180,18 @@ def _single(raw):
 
 def _source_entry(uri, suite, components, key, architectures="amd64"):
     parsed = urlsplit(uri)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-            or parsed.query or parsed.fragment or parsed.port not in (None, 443)
+    ports = {"https": (None, 443), "http": (None, 80)}
+    if (parsed.scheme not in ports or not parsed.hostname or parsed.username or parsed.password
+            or parsed.query or parsed.fragment or parsed.port not in ports[parsed.scheme]
             or any(ord(c) <= 32 or ord(c) >= 127 for c in uri) or "%" in uri):
-        raise ProbeError("APT sources require plain HTTPS archive URLs without credentials or query strings")
+        raise ProbeError("APT sources require plain HTTP(S) archive URLs without credentials or query strings")
     if suite not in CODENAMES or architectures != "amd64":
         raise ProbeError("APT source suite or architecture is unsupported")
     if not components or any(c not in ("main", "contrib", "non-free", "non-free-firmware") for c in components):
         raise ProbeError("APT source component is unsupported")
     keypath = Path(key)
-    if (not keypath.is_absolute() or keypath.parent not in (Path("/usr/share/keyrings"), Path("/etc/apt/keyrings"))
-            or not re.fullmatch(r"[A-Za-z0-9_.+-]+\.(?:gpg|asc)", keypath.name)):
+    if (not keypath.is_absolute() or keypath.parent not in KEYRING_DIRECTORIES
+            or not re.fullmatch(r"[A-Za-z0-9_.+-]+\.(?:gpg|pgp|asc)", keypath.name)):
         raise ProbeError("APT sources require an explicit key file in an approved keyring directory")
     return {"uri": uri.rstrip("/") + "/", "suite": suite, "components": components, "key": key}
 
@@ -157,8 +204,13 @@ def parse_sources(content, *, deb822):
         for record in _paragraphs(content):
             if set(record) - {"types", "uris", "suites", "components", "architectures", "signed-by", "enabled"}:
                 raise ProbeError("APT source contains unsupported options or trust overrides")
-            if record.get("types") != "deb" or record.get("enabled", "yes") != "yes":
-                raise ProbeError("only enabled binary APT sources are supported")
+            enabled = record.get("enabled", "yes").lower()
+            types = record.get("types", "").split()
+            if enabled not in ("yes", "no") or not types or set(types) - {"deb", "deb-src"} or len(set(types)) != len(types):
+                raise ProbeError("APT source types or enabled flag are unsupported")
+            # Disabled stanzas and source-code indexes cannot supply binaries.
+            if enabled == "no" or "deb" not in types:
+                continue
             for uri in record.get("uris", "").split():
                 for suite in record.get("suites", "").split():
                     entries.append(_source_entry(uri, suite, record.get("components", "").split(),
@@ -168,8 +220,8 @@ def parse_sources(content, *, deb822):
     else:
         for line in content.splitlines():
             line = line.strip()
-            if not line or line.startswith("#"):
-                continue
+            if not line or line.startswith("#") or line.startswith("deb-src "):
+                continue  # Source-code indexes cannot supply binary candidates.
             match = re.fullmatch(r"deb \[([^\]]+)\] (\S+) (\S+) (.+)", line)
             if not match:
                 raise ProbeError("APT list sources require explicit Signed-By options")
@@ -199,6 +251,7 @@ def _configuration():
     if not sources or len(sources) > 64:
         raise ProbeError("between one and 64 explicit APT sources are required")
     for source in sources:
+        source["key"] = _resolve_key(source["key"])
         _read(Path(source["key"]), MAX_KEYRING)
     # All include targets must be fingerprinted; reject external include syntax
     # instead of guessing APT's config preprocessor semantics.
@@ -217,7 +270,10 @@ def _configuration():
         if path.exists():
             for line in _read(path, 1024 * 1024).decode("utf-8").splitlines():
                 line = line.strip()
-                if line and not line.startswith("#") and not (line == "no-debsig" or line == "log /var/log/dpkg.log"):
+                # Path filters change which payload files are unpacked, not
+                # package selection, authentication or the dpkg database.
+                if (line and not line.startswith("#") and line not in ("no-debsig", "log /var/log/dpkg.log")
+                        and not re.fullmatch(r"path-(?:exclude|include)[ =]/[^\s]*", line)):
                     raise ProbeError("dpkg configuration has options outside the supported installation contract")
     return fingerprint, sources
 
@@ -349,6 +405,23 @@ def _index_hash(path):
         process.wait(timeout=10)
 
 
+def _signed_release(apt_pkg, source):
+    """Read and authenticate one source's local InRelease with its own key."""
+    prefix = source["uri"] + "dists/" + source["suite"] + "/"
+    release = Path("/var/lib/apt/lists") / apt_pkg.uri_to_filename(prefix + "InRelease")
+    raw = _read(release, 4 * 1024 * 1024)
+    _verify_release(source["key"], release)
+    fields = _release_fields(raw)
+    if fields.get("codename") != source["suite"]:
+        raise ProbeError("signed Release codename differs from the configured codename")
+    return fields
+
+
+def _origin(fields, source, component):
+    return {"origin": fields.get("origin"), "label": fields.get("label"), "archive": fields.get("suite"),
+            "codename": fields.get("codename"), "component": component, "site": urlsplit(source["uri"]).hostname}
+
+
 def _verified_index(apt_pkg, package_file, sources):
     filename = Path(package_file.filename)
     _safe_info(filename)
@@ -361,12 +434,7 @@ def _verified_index(apt_pkg, package_file, sources):
             expected = apt_pkg.uri_to_filename(prefix + relative)
             if filename.name not in [expected + suffix for suffix in ("", ".lz4", ".gz", ".xz", ".bz2")]:
                 continue
-            release = filename.parent / apt_pkg.uri_to_filename(prefix + "InRelease")
-            raw = _read(release, 4 * 1024 * 1024)
-            _verify_release(source["key"], release)
-            fields = _release_fields(raw)
-            if fields.get("codename") != source["suite"]:
-                raise ProbeError("signed Release codename differs from the configured codename")
+            fields = _signed_release(apt_pkg, source)
             sums = {}
             for line in fields.get("sha256", "").splitlines():
                 if not line.strip():
@@ -379,8 +447,7 @@ def _verified_index(apt_pkg, package_file, sources):
                 sums[parts[2]] = (parts[0], int(parts[1]))
             if relative not in sums or _index_hash(filename) != sums[relative]:
                 raise ProbeError("local Packages bytes do not match the signed Release")
-            origin = {"origin": fields.get("origin"), "label": fields.get("label"), "archive": fields.get("suite"),
-                      "codename": fields.get("codename"), "component": component, "site": urlsplit(source["uri"]).hostname}
+            origin = _origin(fields, source, component)
             # Check APT's cached origin as well as the signed Release fields.
             for key in ("origin", "label", "archive", "component", "site"):
                 if getattr(package_file, key) != origin[key]:
@@ -407,9 +474,7 @@ def control_identity(record):
             "essential": record.get("essential", "no") != "no" or record.get("protected", "no") != "no"}
 
 
-def _resolve(apt, apt_pkg, name, architecture):
-    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,127}", name) or architecture not in ("amd64", "all"):
-        raise ProbeError("package selector is invalid")
+def _checked_config(apt_pkg):
     config_digest, sources = _configuration()
     apt_pkg.init_config()
     # debSystem::Initialize normally fills this default during init_system.
@@ -418,6 +483,40 @@ def _resolve(apt, apt_pkg, name, architecture):
     if not apt_pkg.config.find("Dir::State::status"):
         apt_pkg.config.set("Dir::State::status", "/var/lib/dpkg/status")
     check_effective_config(apt_pkg.config)
+    return config_digest, sources
+
+
+def _config_report(apt_pkg):
+    """Describe the effective reviewed inputs; this observation approves nothing.
+
+    The administrator compares sources, key file digests and signed origins
+    with an independent review before copying any value into policy.
+    """
+    config_digest, sources = _checked_config(apt_pkg)
+    report_sources, origins = [], {}
+    for source in sources:
+        key = _read(Path(source["key"]), MAX_KEYRING)
+        entry = {"uri": source["uri"], "suite": source["suite"], "components": source["components"],
+                 "key": source["key"], "key_sha256": hashlib.sha256(key).hexdigest(), "release": None}
+        try:
+            fields = _signed_release(apt_pkg, source)
+        except FileNotFoundError:
+            entry["release"] = "missing; run the separately authorized index refresh before reviewing origins"
+        else:
+            freshness = release_freshness(fields)
+            entry["release"] = {"date": freshness["date"], "valid_until": freshness["valid_until"]}
+            for component in source["components"]:
+                origin = _origin(fields, source, component)
+                origins[_canonical(origin)] = origin
+        report_sources.append(entry)
+    return {"config_digest": config_digest, "sources": report_sources,
+            "origins": [origins[key] for key in sorted(origins)]}
+
+
+def _resolve(apt, apt_pkg, name, architecture):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]{1,127}", name) or architecture not in ("amd64", "all"):
+        raise ProbeError("package selector is invalid")
+    config_digest, sources = _checked_config(apt_pkg)
     # Opening local metadata must not create persistent cache files.
     apt_pkg.config.set("Dir::Cache::pkgcache", "")
     apt_pkg.config.set("Dir::Cache::srcpkgcache", "")
@@ -543,6 +642,8 @@ def main(argv=None):
             result = _download(apt, apt_pkg, args[1:])
         elif len(args) == 2 and args[0] == "artifact":
             result = _artifact(apt_inst, args[1])
+        elif len(args) == 1 and args[0] == "config":
+            result = _config_report(apt_pkg)
         else:
             raise ProbeError("unsupported probe action or arguments")
         print(_canonical(result))

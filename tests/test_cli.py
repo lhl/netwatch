@@ -471,6 +471,30 @@ class CliTests(unittest.TestCase):
         self.assertEqual(result["note"], HOSTILE)
         demo.run_demo.assert_called_once_with()
 
+    def test_native_config_reports_observation_without_state_policy_or_approval(self):
+        report = {"config_digest": "c" * 64, "sources": [{"uri": "http://deb.debian.org/debian/", "suite": "trixie",
+                  "components": ["main"], "key": "/usr/share/keyrings/debian-archive-keyring.pgp",
+                  "key_sha256": "e" * 64, "release": "missing" + HOSTILE}], "origins": []}
+        native = Mock()
+        native.return_value.configuration_report.return_value = report
+        observed = native.return_value.configuration_report
+        with patch.object(cli, "DebianApt", native), \
+                patch.object(cli.local_files, "read_bytes", side_effect=AssertionError("policy opened")), \
+                patch.object(cli.local_files, "prepare_database", side_effect=AssertionError("state opened")):
+            result = self.invoke("native-config", operational=False)
+        observed.assert_called_once_with()
+        native.assert_called_once_with()  # Never live: this command cannot mutate.
+        self.assertEqual(result["kind"], "native-configuration-observation")
+        self.assertIs(result["approved"], False)
+        self.assertEqual(result["config_digest"], "c" * 64)
+        self.assertFalse(self.state.exists())
+        for args in (self.globals() + ["native-config"], ["--live", "native-config"]):
+            with self.subTest(args=args):
+                self.invoke(*args, operational=False, expected=2)
+        native.return_value.configuration_report.side_effect = cli.core.BackendError("APT probe failed")
+        with patch.object(cli, "DebianApt", native):
+            self.assertEqual(self.invoke("native-config", operational=False, expected=1)["error"]["code"], "backend_error")
+
     def test_native_root_live_dispatch_uses_protected_loaders_without_real_operations(self):
         self.native_policy()
         for command in ("execute", "recovery-status", "recover", "resolve-recovery"):
