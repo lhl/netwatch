@@ -31,13 +31,13 @@ This checklist tracks the original assignment: research security feeds and patch
 ## Implementation — Python package, CLI, and examples
 
 - [ ] Provide installable project metadata and a documented CLI.
-- [ ] Persist feeds, normalized incidents or advisories, inventories, findings, plans, approvals, execution results, and audit events as appropriate to the implemented design.
+- [x] Persist feeds, normalized incidents or advisories, inventories, findings, plans, approvals, execution results, and audit events as appropriate to the implemented design. Schema-2 Store/Engine APIs pass focused and integrated offline tests and independent re-review.
 - [x] Ingest pwn.watch data and at least one authoritative applicability source with bounded network requests and deterministic offline fixtures. Python acquisition/parser APIs are verified; durable source health and CLI integration remain below.
 - [x] Import system inventories and implement a read-only local collector. Keep unsupported ecosystems and uncertain matches visible rather than declaring them safe. Native collection is checked with synthetic identity files and fake dpkg output; no private host inventory was taken.
 - [x] Implement evidence-based applicability triage and risk ranking. Feed text cannot supply commands or silently select patch targets. Public parser-to-matcher tests and 1,028 native dpkg comparison cases pass.
-- [ ] Build a remediation queue with validated, structured plans, explicit manual approval, policy-controlled automation, and revalidation before execution.
+- [x] Build a remediation queue with validated, structured plans, explicit manual approval, policy-controlled automation, and revalidation before execution. Python APIs pass actual simulator and fake-native integration; user-facing CLI remains pending.
 - [ ] Provide a runnable end-to-end simulation that changes only disposable fixture state and demonstrates successful verification and failed-update handling.
-- [ ] Implement a narrowly scoped real remediation backend with deterministic fake-runner tests of command construction, authorization, preconditions, execution, and verification. An unavailable implementation prerequisite is a blocker, not completion. Never run live patching during development; disclose live execution as untested.
+- [x] Implement a narrowly scoped real remediation backend with deterministic fake-runner tests of command construction, authorization, preconditions, execution, and verification. Native prerequisites are explicit; all seven runtime findings are closed after independent re-review. The integrated API suite passes 367 tests. No live patching occurred; real Python-APT resolution/download, native lock handoff and privileged execution remain untested.
 - [ ] Provide an advisory export usable by a coding harness without giving feed content executable authority.
 
 ## Verification and review — tests and `docs/REVIEW.md`

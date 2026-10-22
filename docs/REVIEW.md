@@ -2,7 +2,7 @@
 
 ## Scope and completion status
 
-This record covers the design baseline and task-5 feed acquisition, inventory, matching and command-runner APIs. It is not a review of a completed remediation product. SQLite provenance/source health, policy and approval enforcement, remediation backends, recovery lifecycle, packaging, CLI and end-to-end demo remain pending in [DELIVERY.md](DELIVERY.md).
+This record covers the reviewed design, intake, protected-file and backend/lifecycle APIs. It is not a review of a completed remediation product. The packaged CLI, end-to-end command demo, final integration review and operator documentation remain open in [DELIVERY.md](DELIVERY.md).
 
 Reviewers used the configured `astra-xhigh` role with separate review assignments. They did not edit the candidates. Parent integration inspected delegated files, added regression tests and ran the integrated offline suite. Review findings and exact unit handoffs are retained under `worklog/entries/`.
 
@@ -60,12 +60,48 @@ CLI/demo verification is a later delivery gate, not replaced by helper/API tests
 
 Ownership variants were checked with synthetic metadata, not cross-user privileged execution. The invoking user and root remain trusted; checks detect observed changes during reads but do not claim atomic snapshots against those owners. These verified helpers do not establish that the pending CLI reloads policy or protects its state correctly.
 
+## Backend/lifecycle API acceptance
+
+The first integrated candidate passed `python3 -m unittest discover -s tests -v`: **302 tests**, no skips, in 9.034 seconds. This included 12 Store, 58 Engine, 37 backend, 27 APT probe, 17 protected-file and five public Simulator/Engine pipeline tests, alongside the 146-test intake baseline. This result predates the additional native pipeline and path regressions below; it is not final product acceptance.
+
+The parent then added five actual DebianApt/Engine integration tests in `tests/test_native_pipeline.py`. All passed. They use real lifecycle/backend classes, but substitute every native command, inventory observation, clock, root check and lock location. They verify approved success, corrupt-download failure without installation, unrelated package drift retaining the recovery gate, approval expiry after download, and import invalidation of previously HTTPS-acquired authority. No network or native package command runs in these tests.
+
+Parent inspection found early simulator path normalization skipped symlink/missing/non-directory/writable ancestors followed by `..`; a private simulator directory under a writable ancestor was also accepted. Nine failing regression cases reproduced these gaps. Backend directories now reuse the protected descriptor-relative traversal from `local_files.py`, normalizing only after validation. Valid parent traversal remains supported. After repair, focused checks passed: **39 backend tests**, **12 source/runtime/native pipeline tests**, and **17 protected-file tests**. The native directory durability check still verifies the identity and order of actual directory `fsync` operations.
+
+Three independent review assignments covered lifecycle authorization/persistence, backend execution/locks/integration, and APT metadata/acquisition. The backend reviewer confirmed the parent path repair with independent probes. The seven additional findings and their closure status are:
+
+| Finding | Required repair | Status |
+| --- | --- | --- |
+| Final authorization used clock/policy values read before expensive matching; expiry or revocation during that work still allowed mutation. | Engine performs a bounded final policy/clock check after expensive validation. Independent later-boundary probes closed the lifecycle finding. Actual Engine/backend tests and consumer re-review confirmed the final repository time check. | Fixed; independently re-reviewed |
+| Resolving uncertainty left older approved plans in other databases executable. | Store schema 2 records collection context; plans bind target generation. Independent same-second cross-database manual/auto probes require collection and new plans; actual Simulator/Engine tests and backend re-review pass too. | Fixed; independently re-reviewed |
+| A wrong recovery plan ID was finalized before its gate mismatch was rejected. | Exact gate validation precedes outcomes. Independent wrong/absent/malformed/override probes preserve valid plans, outcome absence, audit and generation. Actual Simulator/Engine regression passes. | Fixed; independently re-reviewed |
+| Interrupted exclusive gate creation left truncated JSON that blocked explicit recovery too. | Complete exclusive hard-link publication, recognized two-link crash state, successful-publication authorization marker, and exact malformed-digest recovery. Independent actual Engine interruption probes never reached mutation and permitted recovery and later authorized success. | Fixed; independently re-reviewed |
+| A simulator named `sim.json.lock` could replace another simulator's held lock inode. | Initialization/opening reserve hidden names and `.lock`, `.gate`, `.generation` suffixes. Independent original/legacy-file collision probes and traversal regressions pass. | Fixed; independently re-reviewed |
+| Accepted armored `.asc` keys could not be consumed by the fixed `gpgv --keyring` invocation. | Bounded isolated conversion preserves binary-key verification. Independent real-tool checks verified both formats and a 4 MiB child-output limit without changing parent limits or inherited trust state. | Fixed; independently re-reviewed |
+| Origin deduplication discarded earlier contributing release dates/expiry constraints. | Probe retains all distinct constraints; backend validates exact origin membership/coverage and every date/expiry. Producer-to-consumer tests and independent limit/permutation/callback probes pass. | Fixed; independently re-reviewed |
+
+Parent inspected the repaired candidates and reran their focused tests: **15 Store**, **72 Engine**, **62 backend** and **39 probe** tests passed, with no skips. All eight actual Simulator/Engine cases pass, including same-second cross-database generation invalidation, mandatory new collection/planning/approval, wrong-ID non-consumption and explicit malformed-gate attestation.
+
+The lifecycle re-review closed all three original findings within Store/Engine. Independent probes changed policy/deadlines after the last approval read, and instrumentation found no expensive work after the final clock read. Same-second manual/auto recovery probes required fresh collection and new plans. Abrupt exits after attestation, generation rotation and gate removal preserved attestation and invalidated old cross-database work. A schema-1 rejection preserved the database bytes. Native backend generation/gate compliance was separately re-reviewed below.
+
+The APT probe re-review closed armored-key handling and verified complete release evidence in all six orderings of expired/current/future constraints, with exact-duplicate deduplication. Consumer re-review also closed the freshness-loss finding. It ran 17 selected release/backend/native tests without skips and independently checked six valid permutations across two origins, expired records at positions 0, 511 and 1023 of the 1,024-record limit, and maximum-age/clock-reversal changes during the actual Engine callback. Each invalid case stopped before installation. Backend re-review also closed both original findings and confirmed integrated generation/recovery behavior. It ran **78 focused tests** without skips: 62 backend, eight runtime, six native and two release pipeline tests. Independent actual Simulator/Engine probes injected file-fsync failure, publication-alias cleanup interruption and directory-fsync failure; none reached `apply`. Retained complete gates allowed explicit recovery and later authorized success. Absent gates preserved approved plans, and malformed-gate results/audit consistently reported unverified prior identity.
+
+### Repaired integrated candidate
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+```
+
+Result: **367 tests passed**, no skips, in 14.277 seconds. This combines the 146-test intake baseline, 17 protected-file, 15 Store, 72 Engine, 62 backend, 39 probe, eight runtime pipeline, six native pipeline and two release pipeline tests. `git diff --check` passed. The new `tests/test_release_pipeline.py` passes the actual probe's output unchanged to the actual backend consumer through fake native interfaces. The sixth native pipeline test crosses repository expiry during the final Engine matching pass while every other deadline remains valid; it confirms no installation occurs. No live command ran. All seven review findings are closed for these APIs. CLI and final delivery gates remain open.
+
+The lifecycle reviewer additionally observed one winning claim across four processes and safe retained gates after abrupt exits before claim and after mutation. The APT reviewer reproduced armored/binary key behavior using temporary synthetic signatures and reproduced the freshness loss using two same-origin records. No review performed real APT/dpkg operations. Repair tests and original-reviewer rechecks closed all seven findings before API acceptance.
+
 ## Limits and remaining gates
 
 - Feed parsing still decodes the whole JSON snapshot before structural validation. Input byte limits do not establish a hard parser-memory limit.
 - Trailer validation depends on a private CPython response hook tested on Python 3.12. Other supported runtimes need the real-response regressions. Chunk grammar remains the standard library's responsibility; there is no aggregate wire-byte cap on chunk overhead.
 - Worker network deadlines start after spawn. Interruption before multiprocessing publishes the handle, another interruption during cleanup, forced parent death and OS-delayed termination remain process-supervision concerns.
-- Runner execution/output limits do not forcibly bound native spawn/exec handshake time. Graceful SIGINT cleanup is not crash containment, and process groups do not contain deliberately detached descendants. Other custom raising signal handlers are not guarded during native spawn. Any uncertain mutation must retain the future lifecycle's recovery gate.
+- Runner execution/output limits do not forcibly bound native spawn/exec handshake time. Graceful SIGINT cleanup is not crash containment, and process groups do not contain deliberately detached descendants. Other custom raising signal handlers are not guarded during native spawn. Any uncertain mutation must retain the lifecycle's recovery gate.
 - No private development-host inventory, privileged package update, real APT repository resolution/download, native dpkg frontend-lock handoff or installed-state verification was performed. Native collection tests use synthetic files and fake dpkg output; lock/cleanup tests use temporary files and synthetic Python subprocesses.
-- Fixed-source HTTPS acquisition is not itself durable provenance or source-health enforcement. Those are pending Engine/Store responsibilities; an imported body cannot promote itself to trusted acquisition.
-- Final acceptance still requires the real backend's fake-runner tests, persistent authorization/concurrency/recovery tests, packaged user-facing CLI, disposable end-to-end demo, integrated security review and operator documentation.
+- Fixed-source HTTPS acquisition alone is not durable provenance. The reviewed Engine/Store records acquisition and health separately from imported body claims; final CLI integration must preserve that boundary.
+- Final acceptance still requires packaged user-facing CLI, disposable end-to-end command demo, final integrated security review and operator documentation.

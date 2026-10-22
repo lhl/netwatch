@@ -1,0 +1,21 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Origin: Debian
+Label: Debian
+Suite: stable
+Codename: trixie
+Date: Thu, 15 Jan 2026 12:00:00 UTC
+SHA256:
+ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 100 main/binary-amd64/Packages
+-----BEGIN PGP SIGNATURE-----
+
+wv8AAAEcBAEBCAAGBQJpaNbAAAoJEOoE52hyuGZh9SUIAID8JVBaV87zWGF3mhwR
+mhUUnRLDe281rmhfPUAI2Oxzlk5O2sTfVSd1f5+EVFKtwL/S+3/6vUL5Jyi/5NKz
+OAZU++60Oc5u21oS6hqKCFDd26v/REPez8FbcMC/T6tYqbwfctKnXhFIKXU/N7nU
+9Xyn2eh7nfB9w5n7ZRAPWQ2D7Wb3NYjtGYuwxlBWMT7/aucw7bZ405gGuwwmwqs8
+pJH8rL+E0CgFh8qKy1EM+Aq7/LeHr6n0NlgB9pGJD691Em3XrvMC4wr5g13kRoyl
+rLwFWjVvhJ3XdYegBiR+cPWfTo8XOn8Z6k9lVkYNm6BYxf/HEmj2leM57xfPWmBX
+Oac=
+=xgQV
+-----END PGP SIGNATURE-----
