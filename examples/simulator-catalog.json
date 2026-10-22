@@ -1,0 +1,24 @@
+[
+  {
+    "name": "example-app",
+    "architecture": "amd64",
+    "from_version": "1.0-1",
+    "to_version": "1.0-1+deb13u1",
+    "source_name": "example-app",
+    "source_version": "1.0-1+deb13u1",
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "size": 1,
+    "origins": [
+      {
+        "origin": "Synthetic",
+        "label": "Synthetic",
+        "archive": "stable",
+        "codename": "trixie",
+        "component": "main",
+        "site": "packages.example.invalid"
+      }
+    ],
+    "config_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "metadata_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  }
+]

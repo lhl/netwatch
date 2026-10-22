@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mode": "auto",
+  "backend": "simulator",
+  "allowed_assets": ["example-host"],
+  "allowed_packages": ["example-app"],
+  "allowed_origins": [],
+  "approved_config_digest": null,
+  "max_inventory_age": 3600,
+  "max_feed_age": 3600,
+  "max_repository_age": 86400,
+  "plan_ttl": 600,
+  "approval_ttl": 300,
+  "allow_maintainer_scripts": false,
+  "recovery_confirmed": false,
+  "trusted_installed_lineage": false
+}

@@ -30,23 +30,23 @@ This checklist tracks the original assignment: research security feeds and patch
 
 ## Implementation — Python package, CLI, and examples
 
-- [ ] Provide installable project metadata and a documented CLI.
+- [x] Provide installable project metadata and a documented CLI. Module/console commands, offline wheel/source build and both example workflows pass; independent CLI/demo repair re-reviews closed all findings.
 - [x] Persist feeds, normalized incidents or advisories, inventories, findings, plans, approvals, execution results, and audit events as appropriate to the implemented design. Schema-2 Store/Engine APIs pass focused and integrated offline tests and independent re-review.
-- [x] Ingest pwn.watch data and at least one authoritative applicability source with bounded network requests and deterministic offline fixtures. Python acquisition/parser APIs are verified; durable source health and CLI integration remain below.
+- [x] Ingest pwn.watch data and at least one authoritative applicability source with bounded network requests and deterministic offline fixtures. Python acquisition/parser APIs, durable source health and CLI integration are verified offline.
 - [x] Import system inventories and implement a read-only local collector. Keep unsupported ecosystems and uncertain matches visible rather than declaring them safe. Native collection is checked with synthetic identity files and fake dpkg output; no private host inventory was taken.
 - [x] Implement evidence-based applicability triage and risk ranking. Feed text cannot supply commands or silently select patch targets. Public parser-to-matcher tests and 1,028 native dpkg comparison cases pass.
-- [x] Build a remediation queue with validated, structured plans, explicit manual approval, policy-controlled automation, and revalidation before execution. Python APIs pass actual simulator and fake-native integration; user-facing CLI remains pending.
-- [ ] Provide a runnable end-to-end simulation that changes only disposable fixture state and demonstrates successful verification and failed-update handling.
+- [x] Build a remediation queue with validated, structured plans, explicit manual approval, policy-controlled automation, and revalidation before execution. Python APIs and user-facing commands pass actual simulator and fake-native integration.
+- [x] Provide a runnable end-to-end simulation that changes only disposable fixture state and demonstrates successful verification and failed-update handling. Module and installed-console demos pass 101 commands across four scenarios; independent re-review closed denial-evidence and child-cache findings.
 - [x] Implement a narrowly scoped real remediation backend with deterministic fake-runner tests of command construction, authorization, preconditions, execution, and verification. Native prerequisites are explicit; all seven runtime findings are closed after independent re-review. The integrated API suite passes 367 tests. No live patching occurred; real Python-APT resolution/download, native lock handoff and privileged execution remain untested.
-- [ ] Provide an advisory export usable by a coding harness without giving feed content executable authority.
+- [x] Provide an advisory export usable by a coding harness without giving feed content executable authority. CLI emits an untrusted data envelope with escaped JSON; example/demo checks and independent boundary review pass.
 
 ## Verification and review — tests and `docs/REVIEW.md`
 
-- [ ] Run deterministic offline unit and integration tests. Record the exact command and results.
-- [ ] Run the documented end-to-end demo from a clean temporary state directory.
-- [ ] Exercise hostile feed content, malformed payloads, source spoofing, unsupported version comparisons, duplicate ingestion, stale inventory and approvals, denied policy, command injection, concurrent execution, and failure/rollback behavior as applicable.
-- [ ] Independently review security boundaries and correctness with `astra-xhigh`; record findings, fixes, and unresolved limitations.
-- [ ] Re-run affected checks after fixes and perform an integration review of all delegated changes.
+- [x] Run deterministic offline unit and integration tests. `PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v`: 452 passed, no skips, in 20.165 seconds.
+- [x] Run the documented end-to-end demo from a clean temporary state directory. Direct module and fresh installed-console runs passed all 101 commands and verified cleanup.
+- [x] Exercise hostile feed content, malformed payloads, source spoofing, unsupported version comparisons, duplicate ingestion, stale inventory and approvals, denied policy, command injection, concurrent execution, and failure/rollback behavior as applicable. Evidence and honest recovery limits are recorded in `docs/REVIEW.md`.
+- [x] Independently review security boundaries and correctness with `astra-xhigh`; record findings, fixes, and unresolved limitations. All implementation findings are closed; real privileged deployment remains untested.
+- [x] Re-run affected checks after fixes and perform an integration review of all delegated changes. Parent suite/demo/package checks and original-reviewer rechecks pass; reviewed candidate hashes match.
 - [ ] Inspect final changes for secrets, accidental state, unintended sibling edits, and unsupported claims.
 
 ## Operator documentation and handoff

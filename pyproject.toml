@@ -9,5 +9,8 @@ description = "Local security-advisory triage and policy-authorized remediation"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 
+[project.scripts]
+autoprotect = "autoprotect.cli:main"
+
 [tool.setuptools]
 packages = ["autoprotect"]

@@ -2,7 +2,7 @@
 
 ## Scope and completion status
 
-This record covers the reviewed design, intake, protected-file and backend/lifecycle APIs. It is not a review of a completed remediation product. The packaged CLI, end-to-end command demo, final integration review and operator documentation remain open in [DELIVERY.md](DELIVERY.md).
+This record covers the reviewed design, intake, protected-file and backend/lifecycle APIs, packaged CLI and disposable command demo. Those implementation units are accepted after repair re-reviews. Final documentation and the delivery audit remain open in [DELIVERY.md](DELIVERY.md). Earlier sections retain the evidence and scope at each milestone.
 
 Reviewers used the configured `astra-xhigh` role with separate review assignments. They did not edit the candidates. Parent integration inspected delegated files, added regression tests and ran the integrated offline suite. Review findings and exact unit handoffs are retained under `worklog/entries/`.
 
@@ -96,6 +96,63 @@ Result: **367 tests passed**, no skips, in 14.277 seconds. This combines the 146
 
 The lifecycle reviewer additionally observed one winning claim across four processes and safe retained gates after abrupt exits before claim and after mutation. The APT reviewer reproduced armored/binary key behavior using temporary synthetic signatures and reproduced the freshness loss using two same-origin records. No review performed real APT/dpkg operations. Repair tests and original-reviewer rechecks closed all seven findings before API acceptance.
 
+## CLI and disposable command candidate
+
+The command unit adds `cli.py`, the multiprocessing-safe `__main__.py`, `demo.py`, console metadata, synthetic examples and `scripts/check_package.py`. Separate CLI and demo/package reviews and their repair re-reviews are complete. Final operator documentation remains open. The initial results below precede the repaired candidate's acceptance.
+
+Parent inspected both handoffs and ran:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_cli.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_demo.py' -k DemoCLIIntegration -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 scripts/check_package.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m autoprotect demo
+```
+
+Results: **41 CLI tests passed** in 1.314 seconds; the real-process demo integration passed in 5.340 seconds; the full candidate passed **434 tests**, no skips, in 17.559 seconds. This adds 41 CLI and 26 demo tests to the 367-test runtime baseline. The earlier parent demo Unit selection passed 25 tests in 1.662 seconds. Native and polling tests use mocks; no private host inventory or live package operation ran.
+
+The offline package check built `autoprotect-0.1.0-py3-none-any.whl` and `autoprotect-0.1.0.tar.gz` in a temporary source snapshot using the locally available pinned backend. The wheel installed without an index or dependencies into a fresh temporary virtual environment. Module and console help/version passed outside the repository. The installed console demo and direct module demo both completed **91 ordinary commands**, reported the four expected scenarios and removed their temporary state. The manual/automatic examples in `examples/README.md` were executed verbatim (automatic variant substituted its policy and omitted approval); both returned verified success, the expected updated package version, untrusted export and confirmed temporary-directory removal.
+
+The CLI tests cover every command, policy reload/backend binding, changed inputs, root/live restrictions through fake interfaces, import provenance, null-import rejection, protected paths, fixed-path collisions, error escaping and exit codes, success/denial, failed/uncertain outcomes and recovery. During implementation, a red-first regression found that a policy at the gate-publication alias could be treated as disposable backend state. Both fixed simulator publication aliases are now reserved; the candidate's collision tests pass. Parent integration then reproduced the same omission for native coordination: a caller file at the native gate-publication alias passed CLI validation and was deleted by actual temporary target-lock entry. The repair reserves native lock/gate/generation and gate-publication paths independently of `--state-dir`. Twelve red-first policy/inventory/feed subcases reproduced acceptance; after repair all **42 CLI tests passed** in 1.533 seconds. Native operations were replaced with temporary paths and fake inventory/package locks. Independent re-review has confirmed closure of the simulator/native reservation fixes, including equivalent Linux path spellings.
+
+Independent review returned four additional defects. All four repairs pass focused/integrated checks and original-reviewer re-review:
+
+| Finding | Reproduction and required correction | Status |
+| --- | --- | --- |
+| Equivalent `/tmp/...` and `//tmp/...` paths bypass string collision checks and can delete a caller policy at a gate-publication alias. | Reviewer reproduced deletion through actual Simulator recovery-status and bypass of native reservations. A comparison-only key now equates leading-slash spellings while preserving original-component traversal. Both-direction simulator/native regressions preserve input bytes; 30 subcases failed before repair. | Fixed; independently re-reviewed |
+| Closed stdout is retried during interpreter shutdown, leaking raw `BrokenPipeError` text and exit 120. | Explicit write/flush and closure of failing interpreter-owned streams prevent shutdown retry. Actual module/entry-function subprocesses check queue/help/version, closed stderr and exact exits; caller-owned captures remain open. Ten subprocess subcases failed before repair. | Fixed; independently re-reviewed |
+| Demo denial claims accept unrelated pre-dispatch I/O errors. | Exact category/reason/schema plus newly appended audit evidence where emitted replace generic failure acceptance. Pre-dispatch unrelated and exact-looking but unaudited failures now reject. Retained-gate checks use actual backend error and queue/gate evidence. | Fixed; independently re-reviewed |
+| Demo child interpreters write bytecode outside their temporary state. | Every child uses `-B`. A real cold-copy test verifies successful initialization/inventory, unchanged package bytes and no cache writes. Parent startup flags remain a documented caller responsibility. | Fixed; independently re-reviewed |
+
+No runtime authorization bypass was established by these findings. The CLI reviewer additionally exercised actual CLI/Engine/Store/DebianApt with fake native interfaces: manual and automatic success, missing-live rejection and unrelated-package drift with retained gate and unverified resolution. These are offline integration results, not privileged execution.
+
+The demo/package reviewer found no additional packaging blocker. Parent also adopted the reviewer's optional check-strengthening suggestion: `scripts/check_package.py` now validates required scenario/cleanup fields instead of accepting any dictionary, and prints its summary only after temporary cleanup completes. Three focused `test_package_check.py` tests pass; the updated installed package check also passes after stable repair handoffs.
+
+The demo checks persisted queue, audit, full inventory fingerprints, exact recovery evidence and generation invalidation rather than interpreting exit status alone for successful execution. Its unit tests reject forged success evidence, unrelated denial errors, absent new denial audit evidence and cleanup failure. Synthetic package state is not runtime health, installed-byte authentication or rollback evidence.
+
+### Repaired command integration evidence
+
+Parent inspected both repair handoffs and ran these checks with no active implementation writers:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_cli.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -p 'test_demo.py' -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B scripts/check_package.py
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m autoprotect demo
+```
+
+Results: **49 CLI tests passed** in 1.977 seconds; **33 demo tests passed** in 8.836 seconds, including real subprocess integration and cold-package preservation. The integrated suite passed **452 tests**, no skips, in 20.165 seconds: the 367-test runtime baseline plus 49 CLI, 33 demo and three package-summary tests. Both direct module and freshly installed console demos completed **101 commands** and reported every required outcome and temporary-state removal. The additional ten commands read before/after audit evidence for five Engine-audited denials. Wheel/source builds, runtime inclusion, offline install and module/console help/version all passed outside the repository. Both original-reviewer rechecks confirmed closure before command acceptance.
+
+The CLI re-review closed both findings and the parent's native reservation fix without new findings. It reran all 49 CLI tests in 2.032 seconds and independently repeated both original alias repros, eight native reservation probes, subsequent normal recovery, failed caller-stream flushes and simultaneous closed output descriptors. Caller files remained intact, caller streams remained open, and exact error exits were preserved. No native operation ran.
+
+## Command acceptance
+
+The demo/package re-review closed both findings without new defects. It independently reran all 33 demo tests in 8.698 seconds, including the real 101-command demo, cold-copy preservation and denial fault injection, plus all three package-summary tests. A disposable harness exercised actual packaging-check control flow with stubbed commands: valid results printed only after removal; empty results, cleanup exceptions and retained temporary roots emitted no success summary. It ran no installation or native commands.
+
+Parent compared all six reviewed CLI/demo/package implementation and test file hashes to the independent reviewers' hashes; all matched. The 452-test suite and installed/direct demo evidence therefore apply to the accepted command candidate. Final documentation review is separate from these completed code reviews.
+
 ## Limits and remaining gates
 
 - Feed parsing still decodes the whole JSON snapshot before structural validation. Input byte limits do not establish a hard parser-memory limit.
@@ -103,5 +160,5 @@ The lifecycle reviewer additionally observed one winning claim across four proce
 - Worker network deadlines start after spawn. Interruption before multiprocessing publishes the handle, another interruption during cleanup, forced parent death and OS-delayed termination remain process-supervision concerns.
 - Runner execution/output limits do not forcibly bound native spawn/exec handshake time. Graceful SIGINT cleanup is not crash containment, and process groups do not contain deliberately detached descendants. Other custom raising signal handlers are not guarded during native spawn. Any uncertain mutation must retain the lifecycle's recovery gate.
 - No private development-host inventory, privileged package update, real APT repository resolution/download, native dpkg frontend-lock handoff or installed-state verification was performed. Native collection tests use synthetic files and fake dpkg output; lock/cleanup tests use temporary files and synthetic Python subprocesses.
-- Fixed-source HTTPS acquisition alone is not durable provenance. The reviewed Engine/Store records acquisition and health separately from imported body claims; final CLI integration must preserve that boundary.
-- Final acceptance still requires packaged user-facing CLI, disposable end-to-end command demo, final integrated security review and operator documentation.
+- Fixed-source HTTPS acquisition alone is not durable provenance. The reviewed Engine/Store records acquisition and health separately from imported body claims; CLI provenance regressions preserve that boundary.
+- Final acceptance still requires the documentation and delivery audit. Packaged user-facing commands, disposable end-to-end demo and integrated code reviews are complete.

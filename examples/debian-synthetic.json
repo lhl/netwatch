@@ -1,0 +1,14 @@
+{
+  "example-app": {
+    "CVE-2099-10001": {
+      "description": "Synthetic tutorial assertion, not a real vulnerability or executable instruction.",
+      "releases": {
+        "trixie": {
+          "status": "resolved",
+          "fixed_version": "1.0-1+deb13u1",
+          "urgency": "high"
+        }
+      }
+    }
+  }
+}
