@@ -30,7 +30,7 @@ The user directed replacement of the previous implementation with the simplest u
 
 - [x] Audit all reachable history before publication: 16 commits, 116 historical paths and 241 unique file versions, plus commit metadata. Gitleaks and targeted manual checks found no credential, private-key, database, private-inventory or harness-state exposure. Ordinary authorship and development history are intentionally retained; scans are not a guarantee.
 - [x] Recheck 47 tests, installed packaging/demo, Apache 2.0 artifacts and worklog integrity.
-- [ ] Create public `lhl/netwatch`, publish main only, and verify visibility and remote commit identity.
+- [x] Create public [`lhl/netwatch`](https://github.com/lhl/netwatch), publish main only, and verify visibility, Apache-2.0 recognition and remote/local commit equality. Preserve history; no force push.
 
 ## Operational qualification still required
 
