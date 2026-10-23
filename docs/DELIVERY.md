@@ -57,6 +57,15 @@ This checklist tracks the original assignment: research security feeds and patch
 - [x] Reconcile this checklist against evidence and report delivered files, passing checks, and remaining limitations. `docs/REVIEW.md` and the final delivery worklog record the complete 452-test, module/installed 101-command and independent-review evidence.
 - [x] Final external action: none. No push, publication, live deployment, privileged patching or fleet enrollment was performed; those require separately supplied targets and operational authorization.
 
+## Post-delivery review remediation (2026-10-23)
+
+- [x] Critically review the delivered candidate against real feed data and a stock Debian 13 layout; record findings. See [REVIEW.md](REVIEW.md#post-delivery-critical-review-2026-10-23).
+- [x] Bound triage output and verification cost for real Debian data; prune unreferenced evidence; keep inspection usable during execution (`bc6eb4e`).
+- [x] Support stock Debian 13 configuration and package states; provide a read-only configuration review observation (`27ed6ee`). Real APT/install qualification remains untested.
+- [x] Refuse root execution of code other users can modify (`2905d87`, extended by the review follow-up).
+- [x] Tighten gate lifecycle edges and runner descendant handling (`ca43e85`, corrected by the review follow-up).
+- [x] Independently review the remediation, then resolve or reject each finding with evidence. 485 tests pass on Python 3.12 and 3.14; the package check passes.
+
 ## Context for implementation
 
 The sibling projects `../textguard` and `../jouzu` were inspected read-only. TextGuard's documented Python API provides `scan`, `clean`, and `TextGuard`, with optional semantic backends; it does not prove that arbitrary text is safe. Jouzu's documented harness supports agents, scheduling, and local content scanning; those are investigation and workflow capabilities, not an independent authorization service.

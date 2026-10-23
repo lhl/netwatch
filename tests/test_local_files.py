@@ -211,7 +211,15 @@ class TrustedCodeTests(unittest.TestCase):
         archive = self.root / "python313.zip"
         archive.write_bytes(b"zip")
         archive.chmod(0o644)
-        self.check([str(archive), str(self.root / "missing")])
+        self.check([str(archive), str(self.root / "missing"), str(self.root / "missing" / "deeper")])
+
+    def test_missing_entry_under_a_writable_parent_is_rejected(self):
+        writable = self.root / "shared"
+        writable.mkdir()
+        writable.chmod(0o777)
+        # Another user could create this directory after the check.
+        with self.assertRaises(ValidationError):
+            self.check([str(writable / "created_later")])
 
     def test_writable_or_linked_code_and_untrusted_owners_are_rejected(self):
         cases = [

@@ -131,7 +131,13 @@ def require_trusted_code(package_dir, search_path, *, owner: int = 0) -> None:
             if not isinstance(entry, str):
                 raise ValidationError("module search path entries must be text")
             location = entry or os.getcwd()
-            if os.path.isdir(location):
+            if not os.path.lexists(location):
+                # A missing entry is safe only if no other user can create it.
+                parent = os.path.dirname(os.path.abspath(location))
+                while not os.path.lexists(parent):
+                    parent = os.path.dirname(parent)
+                directory(parent, recurse=False)
+            elif os.path.isdir(location):
                 directory(location, recurse=False)
             elif os.path.lexists(location):
                 # Zip archives and similar importable files.

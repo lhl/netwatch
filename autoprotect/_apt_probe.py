@@ -270,10 +270,12 @@ def _configuration():
         if path.exists():
             for line in _read(path, 1024 * 1024).decode("utf-8").splitlines():
                 line = line.strip()
-                # Path filters change which payload files are unpacked, not
-                # package selection, authentication or the dpkg database.
+                # Documentation filters omit non-executable payload. Other path
+                # filters could leave vulnerable files in place while the
+                # package version verifies as fixed, so they are rejected.
                 if (line and not line.startswith("#") and line not in ("no-debsig", "log /var/log/dpkg.log")
-                        and not re.fullmatch(r"path-(?:exclude|include)[ =]/[^\s]*", line)):
+                        and (not re.fullmatch(r"path-(?:exclude|include)[ =]/usr/share/(?:doc|man|info|locale|"
+                                              r"lintian|linda|groff|help)(?:/[^\s]*)?", line) or "/.." in line)):
                     raise ProbeError("dpkg configuration has options outside the supported installation contract")
     return fingerprint, sources
 

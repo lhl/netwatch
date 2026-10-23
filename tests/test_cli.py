@@ -527,6 +527,17 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(Path(package_dir), Path(cli.__file__).resolve().parent)
                 self.assertIs(search_path, sys.path)
 
+    def test_any_root_invocation_refuses_user_modifiable_code(self):
+        native = Mock(side_effect=AssertionError("native backend constructed"))
+        for args, operational in ((["queue"], True), (["native-config"], False), (["inventory"], True)):
+            with self.subTest(args=args), patch("autoprotect.cli.os.geteuid", return_value=0), \
+                    patch.object(cli, "DebianApt", native), \
+                    patch.object(cli.local_files, "read_bytes", side_effect=AssertionError("policy opened")):
+                result = self.invoke(*args, operational=operational, expected=1)
+                self.assertEqual(result["error"]["code"], "policy_error")
+                self.assertIn("root-owned installation", result["error"]["message"])
+        self.assertFalse(self.state.exists())
+
     def test_live_refuses_code_that_another_user_could_modify_before_reading_policy(self):
         self.native_policy()
         # This checkout and its tests are owned by the invoking user, not root.

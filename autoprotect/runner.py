@@ -289,13 +289,15 @@ class Runner:
                 exited_at = None
                 while selector.get_map():
                     interrupt()
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise IndeterminateError("command exceeded its deadline; inspect operation state before retrying")
                     if exited_at is None and process.poll() is not None:
                         exited_at = time.monotonic()
-                    if exited_at is not None and time.monotonic() - exited_at >= _PIPE_GRACE:
+                    remaining = deadline - time.monotonic()
+                    # A command that exited within its deadline is complete even
+                    # if its pipe grace would extend past that deadline.
+                    if exited_at is not None and (remaining <= 0 or time.monotonic() - exited_at >= _PIPE_GRACE):
                         break  # The command exited; a descendant still holds an output pipe.
+                    if remaining <= 0:
+                        raise IndeterminateError("command exceeded its deadline; inspect operation state before retrying")
                     for key, _ in selector.select(min(remaining, 0.1)):
                         # At most one byte beyond the cap is read to detect overflow.
                         try:
@@ -309,17 +311,18 @@ class Runner:
                         if total > self.max_output_bytes:
                             raise IndeterminateError("command exceeded its output limit; inspect operation state before retrying")
                         output[key.data].extend(chunk)
-                while True:
+                while process.returncode is None:
                     interrupt()
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise IndeterminateError("command exceeded its deadline; inspect operation state before retrying")
                     try:
-                        returncode = process.wait(timeout=min(remaining, 0.1))
-                        break
+                        process.wait(timeout=min(remaining, 0.1))
                     except subprocess.TimeoutExpired:
                         continue
-                completed = True
+                returncode = process.returncode
+                # Descendants may be kept only after a successful exit.
+                completed = returncode == 0
                 return CommandResult(returncode, output[0].decode("utf-8", errors="replace"),
                                      output[1].decode("utf-8", errors="replace"))
             except OSError as exc:

@@ -217,15 +217,19 @@ def _dispatch(engine, args, data):
     raise core.ValidationError("Unsupported command")
 
 
+def _require_trusted_code():
+    # Any root invocation, not only --live, would run this code with root
+    # privileges, including native-config's APT helper and inventory queries.
+    try:
+        local_files.require_trusted_code(os.path.dirname(os.path.abspath(__file__)), sys.path)
+    except core.ValidationError as exc:
+        raise core.PolicyError("Running as root requires a root-owned installation and module search path; run the "
+                               "installed entry point or python3 -I from a root-owned location (" + str(exc) + ")") from exc
+
+
 def _operate(args):
     if args.live and os.geteuid() != 0:
         raise core.PolicyError("--live requires effective root; use non-live commands for investigation")
-    if args.live:
-        try:
-            local_files.require_trusted_code(os.path.dirname(os.path.abspath(__file__)), sys.path)
-        except core.ValidationError as exc:
-            raise core.PolicyError("--live requires a root-owned installation and module search path; run the "
-                                   "installed entry point or python3 -I from a root-owned location (" + str(exc) + ")") from exc
     provider = _policy_provider(args.policy, live=args.live)
     policy = provider()
     if policy["backend"] == "simulator" and args.live:
@@ -280,6 +284,8 @@ def main(argv=None):
     """Return a process exit code; help/version are the only plain-text output."""
     try:
         args = _parser().parse_args(argv)
+        if os.geteuid() == 0:
+            _require_trusted_code()
         if args.command in ("demo", "native-config"):
             if args.state_dir is not None or args.policy is not None or args.live:
                 raise _ArgumentError(f"{args.command} accepts no --state-dir, --policy or --live options")

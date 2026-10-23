@@ -25,7 +25,7 @@ _EXPECTED_TABLES = {"objects", "source_health", "inventory_heads", "finding_inde
                     "approval_heads", "outcomes", "audit"}
 # Verified canonical text for large immutable objects. Byte-identical rows are
 # re-parsed without repeating validation/hashing; any difference re-verifies.
-_VERIFIED_CACHE = 4
+_VERIFIED_CACHE = 2
 _VERIFIED_MIN_BYTES = 64 * 1024
 _KINDS = {"source", "inventory", "findings", "plan", "approval"}
 FINAL_STATUSES = frozenset({"succeeded", "failed", "needs_attention", "stale"})

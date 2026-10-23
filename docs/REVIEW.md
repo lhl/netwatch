@@ -2,7 +2,7 @@
 
 ## Scope and completion status
 
-This record covers the reviewed local proof of concept: source research, design, intake, protected-file and backend/lifecycle APIs, packaged CLI, disposable command demo and operator documentation. All implementation findings are resolved and independently re-reviewed; the final documentation audit found no actionable issues. [DELIVERY.md](DELIVERY.md) records the completed scope. Earlier sections retain the evidence and scope at each milestone. This acceptance does not qualify real privileged deployment.
+This record covers the reviewed local proof of concept: source research, design, intake, protected-file and backend/lifecycle APIs, packaged CLI, disposable command demo and operator documentation. All implementation findings are resolved and independently re-reviewed; the final documentation audit found no actionable issues. [DELIVERY.md](DELIVERY.md) records the completed scope. Earlier sections retain the evidence and scope at each milestone. This acceptance does not qualify real privileged deployment. A later [post-delivery critical review](#post-delivery-critical-review-2026-10-23) found scale, native-compatibility and privilege defects; their resolution and independent re-review are recorded there.
 
 Reviewers used the configured `astra-xhigh` role with separate review assignments. They did not edit the candidates. Parent integration inspected delegated files, added regression tests and ran the integrated offline suite. Review findings and exact unit handoffs are retained under `worklog/entries/`.
 
@@ -166,9 +166,35 @@ The delivery checklist is complete for this proof of concept. Native qualificati
 ## Limits and deployment gates
 
 - Feed parsing still decodes the whole JSON snapshot before structural validation. Input byte limits do not establish a hard parser-memory limit.
-- Trailer validation depends on a private CPython response hook tested on Python 3.12. Other supported runtimes need the real-response regressions. Chunk grammar remains the standard library's responsibility; there is no aggregate wire-byte cap on chunk overhead.
+- Trailer validation depends on a private CPython response hook; the real-response regressions pass on Python 3.12 and 3.14. Python 3.13, Debian 13's interpreter, was not run. Chunk grammar remains the standard library's responsibility; there is no aggregate wire-byte cap on chunk overhead.
 - Worker network deadlines start after spawn. Interruption before multiprocessing publishes the handle, another interruption during cleanup, forced parent death and OS-delayed termination remain process-supervision concerns.
 - Runner execution/output limits do not forcibly bound native spawn/exec handshake time. Graceful SIGINT cleanup is not crash containment, and process groups do not contain deliberately detached descendants. Other custom raising signal handlers are not guarded during native spawn. Any uncertain mutation must retain the lifecycle's recovery gate.
 - No private development-host inventory, privileged package update, real APT repository resolution/download, native dpkg frontend-lock handoff or installed-state verification was performed. Native collection tests use synthetic files and fake dpkg output; lock/cleanup tests use temporary files and synthetic Python subprocesses.
 - Fixed-source HTTPS acquisition alone is not durable provenance. The reviewed Engine/Store records acquisition and health separately from imported body claims; CLI provenance regressions preserve that boundary.
-- The local proof-of-concept delivery is complete. Production scheduling, fleet enrollment, authenticated operators, externally protected audit, native fingerprint provisioning and real privileged qualification remain separate deployment work.
+- The local proof-of-concept delivery is complete. Production scheduling, fleet enrollment, authenticated operators, externally protected audit and real privileged qualification remain separate deployment work. `native-config` supplies a read-only observation for configuration review; the independent review it requires is an operator procedure, not a product guarantee.
+
+## Post-delivery critical review (2026-10-23)
+
+A critical review of `73e27d7` used the real Debian tracker export (86 MB; 77,414 trixie records) and a disposable `debian:trixie-slim` image. It found these defects, fixed in `bc6eb4e`, `27ed6ee`, `2905d87` and `ca43e85`:
+
+| Severity | Defect | Resolution |
+| --- | --- | --- |
+| High | Native backend could not pass the probe on stock Debian 13: base-files/keyring symlinks, `.pgp` keys, HTTP mirrors, `rc`/multiarch packages; Python pinned below trixie's 3.13 | In-root symlink fingerprinting, key aliases, signed HTTP sources, settled-state readiness, Python `>=3.12`, read-only `native-config` |
+| High | Whole-host triage exceeded its 64 MiB bound for five `linux`-source binaries, blocking all planning | Findings grouped by package, status, fixed version and explanation with `advisory_ids`; worst case 1,760 rows/2 MB |
+| Medium | `execute` 83 s and `plan` 20 s (repeated snapshot hashing and whole-host rematching under the write lock); inspection commands blocked during execution | Targeted `verify_affected`, verified-text cache, deferred read views, polling outside the write lock; `execute` 2 s, `plan` 0.6 s |
+| Medium | Immutable findings sets and polled snapshots accumulated without bound | Schema 3, v2 migration, transactional pruning of unreferenced evidence; only affected findings persisted |
+| Medium | Root could execute user-writable code (checkout venv, `python3 -m` current directory, adjacent probe) | Root invocations require root-owned package and module search path |
+| Low | Gate retained after a pre-commit claim failure; malformed-gate override could finalize an unrelated plan; runner timed out on pipe-holding descendants and killed maintainer-script services; stable-suite freshness undocumented | Gate `cancel`, unclaimed-gate `recover`, malformed scope limited to `executing`, pipe grace and `keep_descendants` for successful installs, freshness guidance |
+
+An independent read-only reviewer then examined `73e27d7..HEAD` and found no authorization bypass. It confirmed that `verify_affected` derives exactly what `match` derives, that prune retains everything referenced by plans and outcomes, and that the v2 migration, cache, poll race, symlink containment, cancel/recover ordering and runner return codes are correct. Its findings and their dispositions:
+
+1. Medium, valid: `keep_descendants` also kept descendants after a nonzero `dpkg` exit. Now only a zero exit keeps them. Regression added.
+2. Medium-low, valid: arbitrary dpkg `path-exclude` could leave vulnerable files while the version verified as fixed. Filters are now limited to documentation-like trees with no `..`.
+3. Low, rejected with evidence: the claim that stock Debian `/usr/local` Python directories are `root:staff 2775`. A fresh trixie `python3-minimal` install in a disposable container showed `root:root 0755`. Upgraded hosts may differ; this is documented, and the check fails closed.
+4. Low, valid: missing `sys.path` entries were skipped, and root `native-config`/`demo` ran before the check. Missing entries now require a trusted nearest ancestor, and every effective-root invocation is checked. `.pth` files, ACLs and module contents inside root-owned directories remain uninspected; this is documented.
+5. Low, valid: HTTP allows replay of an older stable-suite Release within `max_repository_age`. Documented, with a recommendation for HTTPS mirrors.
+6. Low, valid: the deadline could fire during the pipe grace after a timely exit. Exit now takes precedence; the descendant regression was updated accordingly.
+7. Low, rejected: multiarch `same` skew is already refused by the APT simulation singleton check during planning. The malformed wrong-plan edge predates this change and is documented.
+8. Low, valid: the verified-text cache is reduced to two entries.
+
+Evidence: `python3 -m unittest discover -s tests` passes 485 tests on Python 3.12.13 and on `/usr/bin/python3.14`; `python3 -B scripts/check_package.py` passes. Real APT resolution, signatures against Debian keys, downloads, lock handoff, installation and recovery on Debian remain untested.

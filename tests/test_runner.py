@@ -142,7 +142,7 @@ class RunnerTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2)
 
     @unittest.skipUnless(hasattr(os, "fork"), "POSIX fork is needed for the descendant test")
-    def test_timeout_kills_descendant_even_after_leader_exits(self):
+    def test_finished_leader_completes_but_descendant_is_still_killed(self):
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_UNIX) as listener:
             socket_path = str(Path(directory) / "child.sock")
             pidfile = Path(directory) / "child.pid"
@@ -159,8 +159,10 @@ class RunnerTests(unittest.TestCase):
                 "signal.pause()\n"
             )
             try:
-                with self.assertRaisesRegex(IndeterminateError, "deadline"):
-                    Runner().run([PYTHON, "-c", script, socket_path, str(pidfile)], timeout=0.3)
+                # The leader exited inside its deadline, so the command is
+                # complete; its pipe-holding descendant is still killed.
+                result = Runner().run([PYTHON, "-c", script, socket_path, str(pidfile)], timeout=0.3)
+                self.assertEqual(result.returncode, 0)
                 connection, _ = listener.accept()
                 with connection:
                     connection.settimeout(2)
@@ -205,6 +207,33 @@ class RunnerTests(unittest.TestCase):
                             os.kill(int(pidfile.read_text()), signal.SIGKILL)
                         except ProcessLookupError:
                             pass
+
+    def test_nonzero_exit_kills_descendants_even_when_keeping_was_requested(self):
+        script = ("import os,signal,sys\n"
+                  "pid=os.fork()\n"
+                  "if pid:\n open(sys.argv[1],'w').write(str(pid)); os._exit(3)\n"
+                  "os.close(1); os.close(2); signal.pause()\n")
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / "daemon.pid"
+            try:
+                result = Runner().run([PYTHON, "-c", script, str(pidfile)], timeout=10, keep_descendants=True)
+                self.assertEqual(result.returncode, 3)
+                daemon = int(pidfile.read_text())
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    try:
+                        os.kill(daemon, 0)
+                        time.sleep(0.02)
+                    except ProcessLookupError:
+                        break
+                else:
+                    self.fail("descendant of a failed command survived")
+            finally:
+                if pidfile.exists():
+                    try:
+                        os.kill(int(pidfile.read_text()), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
     def test_failures_kill_descendants_even_when_keeping_was_requested(self):
         with patch("autoprotect.runner.os.killpg", wraps=os.killpg) as killpg:

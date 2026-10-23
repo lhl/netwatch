@@ -203,9 +203,14 @@ class ConfigurationTests(unittest.TestCase):
             files[Path("/etc/dpkg/dpkg.cfg")] = b"# normal defaults\nno-debsig\nlog /var/log/dpkg.log\n"
             self.assertEqual(probe._configuration(), ("c" * 64, SOURCES))
             # Cloud images filter documentation payloads; that is not a force option.
-            files[Path("/etc/dpkg/dpkg.cfg")] += b"path-exclude=/usr/share/doc/*\npath-include /usr/share/doc/*/copyright\n"
+            files[Path("/etc/dpkg/dpkg.cfg")] += (b"path-exclude=/usr/share/doc/*\npath-include /usr/share/doc/*/copyright\n"
+                                                  b"path-exclude=/usr/share/man/*\npath-exclude=/usr/share/locale/*\n")
             self.assertEqual(probe._configuration(), ("c" * 64, SOURCES))
-            for line in (b"path-exclude=relative\n", b"force-unsafe-io\n", b"admindir=/tmp\n"):
+            # Excluding executable payload could leave a vulnerable file behind
+            # while the package version verifies as fixed.
+            for line in (b"path-exclude=relative\n", b"force-unsafe-io\n", b"admindir=/tmp\n",
+                         b"path-exclude=/usr/lib/x86_64-linux-gnu/libfoo.so*\n", b"path-exclude=/usr/share/docs-evil/*\n",
+                         b"path-exclude=/usr/share/doc/../../lib/*\n"):
                 with self.subTest(line=line), self.assertRaisesRegex(probe.ProbeError, "dpkg configuration"):
                     files[Path("/etc/dpkg/dpkg.cfg")] = line
                     probe._configuration()
