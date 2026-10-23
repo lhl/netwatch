@@ -26,6 +26,12 @@ The user directed replacement of the previous implementation with the simplest u
 - [x] Add the unmodified Apache License 2.0 text and SPDX `Apache-2.0` metadata. Include the license in wheel/source distributions and link it from README.
 - [x] Run 47 tests, renamed module/demo and installed packaging checks, including license bytes and metadata. Record the worklog and commit; no publication or remote-repository change.
 
+## Public publication
+
+- [x] Audit all reachable history before publication: 16 commits, 116 historical paths and 241 unique file versions, plus commit metadata. Gitleaks and targeted manual checks found no credential, private-key, database, private-inventory or harness-state exposure. Ordinary authorship and development history are intentionally retained; scans are not a guarantee.
+- [x] Recheck 47 tests, installed packaging/demo, Apache 2.0 artifacts and worklog integrity.
+- [ ] Create public `lhl/netwatch`, publish main only, and verify visibility and remote commit identity.
+
 ## Operational qualification still required
 
 No actual machine list/access was supplied for operations. Fixture coverage is not a live rollout. Before use for updates, qualify each applicable package-manager version, credentials, project layout and recovery procedure on explicitly authorized disposable systems. Conda-native advisory coverage and authoritative CachyOS matching are not implemented; those environments still support inventory and update workflows with visible uncertainty.
