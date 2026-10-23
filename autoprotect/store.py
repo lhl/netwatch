@@ -1,401 +1,115 @@
-"""SQLite persistence for content identities and the serialized local lifecycle.
-
-Callers must use transaction() for writes and read() for consistent read-only
-views. Hashes detect corruption, not a writer who controls this database.
-Approval actor labels are not authentication. Plans, approvals, outcomes and
-audit events are never deleted. Source snapshots, findings sets and inventories
-are retained while a head, plan, outcome or current findings set references
-them; prune() removes the rest so repeated polling and triage stay bounded.
-"""
-
-from __future__ import annotations
-
-from collections import OrderedDict
-from contextlib import contextmanager
+"""Local recordkeeping. The database owner is trusted; this is not an auth service."""
 import json
-import re
+import os
+from pathlib import Path
 import sqlite3
+import time
+from contextlib import contextmanager
 
-from .core import AutoprotectError, PolicyError, ValidationError, canonical, digest, identifier, integer, load_json
-
-
-SCHEMA_VERSION = 4
-_PRUNABLE = ("source", "findings", "inventory")
-_EXPECTED_TABLES = {"objects", "source_health", "inventory_heads", "finding_index", "finding_sets", "plan_status",
-                    "approval_heads", "outcomes", "audit"}
-# Verified canonical text for large immutable objects. Byte-identical rows are
-# re-parsed without repeating validation/hashing; any difference re-verifies.
-_VERIFIED_CACHE = 2
-_VERIFIED_MIN_BYTES = 64 * 1024
-_KINDS = {"source", "inventory", "findings", "plan", "approval"}
-FINAL_STATUSES = frozenset({"succeeded", "failed", "needs_attention", "stale"})
-_STATUSES = FINAL_STATUSES | {"pending", "approved", "executing"}
-
-
-def content_id(value):
-    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
-        raise ValidationError("Content ID must be a lowercase SHA-256 digest")
-    return value
+from .core import Error, canonical
 
 
 class Store:
     def __init__(self, path):
-        self.connection = sqlite3.connect(str(path), timeout=5, isolation_level=None)
-        self.connection.row_factory = sqlite3.Row
-        self._verified = OrderedDict()
-        try:
-            self.connection.execute("PRAGMA foreign_keys = ON")
-            self.connection.execute("PRAGMA busy_timeout = 5000")
-            self.connection.execute("PRAGMA synchronous = FULL")
-            with self.transaction():
-                version = self.connection.execute("PRAGMA user_version").fetchone()[0]
-                tables = self.connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-                ).fetchall()
-                names = {row[0] for row in tables}
-                if version != SCHEMA_VERSION:
-                    if version != 0 or tables:
-                        raise ValidationError(
-                            f"Unsupported store schema version {version}; use a fresh state directory. "
-                            f"This build requires schema {SCHEMA_VERSION} and does not migrate, "
-                            "reinterpret, or silently discard prior records or approvals."
-                        )
-                    self._initialize()
-                elif names != _EXPECTED_TABLES:
-                    raise ValidationError("Store schema is incomplete or unsupported")
-        except BaseException:
-            self.close()
-            raise
+        path = Path(path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if path.is_symlink():
+            raise Error("Database must not be a symlink")
+        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        if path.stat().st_uid != os.geteuid() or path.stat().st_mode & 0o077:
+            raise Error("Database must be owned by this user with mode 600")
+        self.db = sqlite3.connect(path, timeout=10, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        schema = self.db.execute("PRAGMA user_version").fetchone()[0]
+        tables = self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        if schema != 10 and (schema or tables):
+            self.db.close()
+            raise Error("Incompatible old database; keep it for history and use a new --db path")
+        self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS targets(name TEXT PRIMARY KEY, body TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS scans(id INTEGER PRIMARY KEY, target TEXT, at INTEGER, body TEXT);
+            CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, target TEXT, at INTEGER, kind TEXT, body TEXT);
+            CREATE TABLE IF NOT EXISTS cache(key TEXT PRIMARY KEY, at INTEGER, body TEXT);
+            CREATE TABLE IF NOT EXISTS plans(id INTEGER PRIMARY KEY, target TEXT, at INTEGER, status TEXT, body TEXT, result TEXT);
+            PRAGMA user_version=10;
+        """)
 
-    def _initialize(self):
-        statements = [
-            """CREATE TABLE objects (
-                id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('source','inventory','findings','plan','approval')),
-                body TEXT NOT NULL)""",
-            """CREATE TABLE source_health (
-                source TEXT PRIMARY KEY CHECK(source IN ('pwn','ubuntu')),
-                snapshot_id TEXT REFERENCES objects(id), acquisition TEXT, endpoint TEXT, etag TEXT,
-                last_attempt INTEGER NOT NULL, last_success INTEGER, error TEXT, revision INTEGER NOT NULL)""",
-            """CREATE TABLE inventory_heads (
-                asset_id TEXT PRIMARY KEY, inventory_id TEXT NOT NULL REFERENCES objects(id),
-                backend TEXT CHECK(backend IN ('simulator','ubuntu-apt')), target_generation TEXT,
-                CHECK((backend IS NULL AND target_generation IS NULL) OR
-                      (backend IS NOT NULL AND target_generation IS NOT NULL)))""",
-            """CREATE TABLE finding_index (
-                finding_id TEXT PRIMARY KEY, set_id TEXT NOT NULL REFERENCES objects(id))""",
-            self._FINDING_SETS,
-            """CREATE TABLE plan_status (
-                plan_id TEXT PRIMARY KEY REFERENCES objects(id),
-                status TEXT NOT NULL CHECK(status IN ('pending','approved','executing','succeeded','failed','needs_attention','stale')))""",
-            """CREATE TABLE approval_heads (
-                plan_id TEXT PRIMARY KEY REFERENCES plan_status(plan_id),
-                approval_id TEXT NOT NULL REFERENCES objects(id))""",
-            """CREATE TABLE outcomes (
-                plan_id TEXT PRIMARY KEY REFERENCES plan_status(plan_id),
-                body TEXT NOT NULL, digest TEXT NOT NULL, inventory_id TEXT REFERENCES objects(id))""",
-            """CREATE TABLE audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, event TEXT NOT NULL, details TEXT NOT NULL)""",
-        ]
-        for statement in statements:
-            self.connection.execute(statement)
-        for table in ("objects", "outcomes", "audit"):
-            for operation in ("UPDATE", "DELETE"):
-                if (table, operation) == ("objects", "DELETE"):
-                    self.connection.execute(self._OBJECT_DELETE)
-                    continue
-                self.connection.execute(
-                    f"CREATE TRIGGER immutable_{table}_{operation.lower()} BEFORE {operation} ON {table} "
-                    "BEGIN SELECT RAISE(ABORT, 'immutable record'); END"
-                )
-        self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-
-    _FINDING_SETS = """CREATE TABLE finding_sets (
-        set_id TEXT PRIMARY KEY REFERENCES objects(id), inventory_id TEXT, source_digest TEXT)"""
-    # Plans and approvals are permanent. Evidence objects may be removed only
-    # through prune(), which first proves that nothing retained references them.
-    _OBJECT_DELETE = ("CREATE TRIGGER immutable_objects_delete BEFORE DELETE ON objects "
-                      "WHEN OLD.kind NOT IN ('source','findings','inventory') "
-                      "BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
+    def close(self):
+        self.db.close()
 
     @contextmanager
     def transaction(self):
-        if self.connection.in_transaction:
-            raise AutoprotectError("Nested store transactions are not supported")
-        self.connection.execute("BEGIN IMMEDIATE")
+        self.db.execute("BEGIN IMMEDIATE")
         try:
-            yield self
-            self.connection.execute("COMMIT")
+            yield
         except BaseException:
-            if self.connection.in_transaction:
-                self.connection.execute("ROLLBACK")
+            self.db.rollback()
             raise
-
-    @contextmanager
-    def read(self):
-        """A consistent deferred read view that does not block a running writer."""
-        if self.connection.in_transaction:
-            raise AutoprotectError("Nested store transactions are not supported")
-        self.connection.execute("BEGIN DEFERRED")
-        try:
-            yield self
-        finally:
-            if self.connection.in_transaction:
-                self.connection.execute("ROLLBACK")
-
-    def _writing(self):
-        if not self.connection.in_transaction:
-            raise AutoprotectError("Store writes require an explicit transaction")
-
-    def close(self):
-        self.connection.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_args):
-        self.close()
-
-    def put(self, kind, body):
-        self._writing()
-        if kind not in _KINDS:
-            raise ValidationError("Unsupported immutable object kind")
-        key = digest(body)
-        existing = self.connection.execute("SELECT kind FROM objects WHERE id=?", (key,)).fetchone()
-        if existing:
-            if existing["kind"] != kind or self.get(kind, key) != body:
-                raise ValidationError("Immutable content identity conflict")
         else:
-            self.connection.execute("INSERT INTO objects VALUES (?, ?, ?)", (key, kind, canonical(body)))
-        return key
+            self.db.commit()
 
-    def get(self, kind, key):
-        content_id(key)
-        row = self.connection.execute("SELECT kind,body FROM objects WHERE id=?", (key,)).fetchone()
-        if row is None or row["kind"] != kind:
-            raise ValidationError("Requested immutable object does not exist with the expected kind")
-        raw = row["body"]
-        if self._verified.get(key) == raw:
-            self._verified.move_to_end(key)
-            return json.loads(raw)  # Exactly the canonical text verified below.
-        body = load_json(raw, max_bytes=256 * 1024 * 1024, max_nodes=8_000_000)
-        if digest(body) != key:
-            raise ValidationError("Immutable object failed its content hash check")
-        if len(raw) >= _VERIFIED_MIN_BYTES and canonical(body) == raw:
-            self._verified[key] = raw
-            while len(self._verified) > _VERIFIED_CACHE:
-                self._verified.popitem(last=False)
+    def event(self, target, kind, body):
+        self.db.execute("INSERT INTO events(target,at,kind,body) VALUES(?,?,?,?)",
+                        (target, int(time.time()), kind, canonical(body)))
+
+    def targets(self):
+        return [json.loads(r[0]) for r in self.db.execute("SELECT body FROM targets ORDER BY name")]
+
+    def target(self, name):
+        row = self.db.execute("SELECT body FROM targets WHERE name=?", (name,)).fetchone()
+        if row is None:
+            raise Error("Unknown environment; use add first")
+        return json.loads(row[0])
+
+    def latest(self, name):
+        row = self.db.execute("SELECT id,at,body FROM scans WHERE target=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+        return {"id": row["id"], "at": row["at"], **json.loads(row["body"])} if row else None
+
+    def save_scan(self, name, report):
+        with self.transaction():
+            previous = self.latest(name)
+            old = {r["key"]: r for r in previous["findings"]} if previous else {}
+            new = {r["key"]: r for r in report["findings"]}
+            for key, row in new.items():
+                row["first_seen"] = old.get(key, {}).get("first_seen", int(time.time()))
+                row["last_seen"] = int(time.time())
+                semantic = lambda r: {k: v for k, v in r.items() if k not in ("first_seen", "last_seen")}
+                if semantic(old.get(key, {})) != semantic(row):
+                    self.event(name, "finding_changed" if key in old else "finding_new", row)
+            # Only successful evidence collection can clear previous findings.
+            if report["advisory_check_ok"]:
+                for key in old.keys() - new.keys():
+                    self.event(name, "finding_no_longer_detected", old[key])
+            else:
+                for key in old.keys() - new.keys():
+                    new[key] = {**old[key], "state": "unknown", "reason": "Evidence incomplete; previous finding retained"}
+                    if new[key] != old[key]:
+                        self.event(name, "finding_changed", new[key])
+            report["findings"] = sorted(new.values(), key=lambda r: r["key"])
+            report["updates_observed_at"] = int(time.time())
+            if report["update_error"]:
+                report["updates"] = previous["updates"] if previous else []
+                report["updates_observed_at"] = previous.get("updates_observed_at") if previous else None
+            for field in ("updates", "warnings"):
+                if not previous or previous.get(field) != report[field]:
+                    self.event(name, field + "_changed", {field: report[field]})
+            self.db.execute("INSERT INTO scans(target,at,body) VALUES(?,?,?)", (name, int(time.time()), canonical(report)))
+            self.event(name, "checked", {"packages": len(report["packages"]), "advisory_check_ok": report["advisory_check_ok"]})
+        return self.latest(name)
+
+    def events(self, since=0, target=None):
+        rows = self.db.execute("SELECT * FROM events WHERE id>? AND (? IS NULL OR target=?) ORDER BY id LIMIT 1000",
+                               (since, target, target)).fetchall()
+        return [{**dict(r), "body": json.loads(r["body"])} for r in rows]
+
+    def cached(self, key, loader, *, offline=False, max_age=86400):
+        row = self.db.execute("SELECT at,body FROM cache WHERE key=?", (key,)).fetchone()
+        age = int(time.time()) - row["at"] if row else None
+        if row and max_age > 0 and 0 <= age <= max_age:
+            return json.loads(row["body"])
+        if offline:
+            raise Error("Missing or stale cached advisory evidence; run check without --offline")
+        body = loader()
+        self.db.execute("INSERT OR REPLACE INTO cache VALUES(?,?,?)", (key, int(time.time()), canonical(body)))
         return body
-
-    def source_health(self, source):
-        row = self.connection.execute("SELECT * FROM source_health WHERE source=?", (source,)).fetchone()
-        return dict(row) if row else None
-
-    def record_source(self, source, at, *, body=None, etag=None, error=None):
-        self._writing()
-        if source not in ("pwn", "ubuntu"):
-            raise ValidationError("Source must be pwn or ubuntu")
-        integer(at, "source attempt time")
-        previous = self.source_health(source)
-        if error is not None:
-            # Failures retain every last-good field, including validators and success time.
-            values = dict(previous) if previous else {
-                "snapshot_id": None, "acquisition": None, "endpoint": None, "etag": None, "last_success": None,
-            }
-        else:
-            if body is None:
-                if not previous or previous["snapshot_id"] is None:
-                    raise ValidationError("Source refresh requires a previous snapshot")
-                body = self.get("source", previous["snapshot_id"])
-            if body["source"] != source:
-                raise ValidationError("Source snapshot identity does not match its head")
-            key = self.put("source", body)
-            values = {"snapshot_id": key, "acquisition": body["acquisition"], "endpoint": body["endpoint"],
-                      "etag": etag, "last_success": at}
-        self.connection.execute(
-            """INSERT INTO source_health VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-               ON CONFLICT(source) DO UPDATE SET snapshot_id=excluded.snapshot_id,
-               acquisition=excluded.acquisition, endpoint=excluded.endpoint, etag=excluded.etag,
-               last_attempt=excluded.last_attempt, last_success=excluded.last_success,
-               error=excluded.error, revision=excluded.revision""",
-            (source, values["snapshot_id"], values["acquisition"], values["endpoint"], values["etag"], at,
-             values["last_success"], error, previous["revision"] + 1 if previous else 1),
-        )
-        return self.source_health(source)
-
-    def save_inventory(self, body, *, backend=None, target_generation=None):
-        """Record collection context separately; imported body labels cannot set it.
-
-        An identical same-second observation may retain its content ID while a
-        new collection replaces its head's recovery generation.
-        """
-        self._writing()
-        if backend is not None or target_generation is not None:
-            if backend not in ("simulator", "ubuntu-apt") or target_generation is None:
-                raise ValidationError("Collection context requires a supported backend and its generation")
-            content_id(target_generation)
-        key = self.put("inventory", body)
-        self.connection.execute(
-            """INSERT INTO inventory_heads VALUES (?,?,?,?) ON CONFLICT(asset_id) DO UPDATE SET
-               inventory_id=excluded.inventory_id, backend=excluded.backend, target_generation=excluded.target_generation""",
-            (body["asset_id"], key, backend, target_generation),
-        )
-        return {"id": key, "body": body}
-
-    def inventory_context(self, asset_id):
-        row = self.connection.execute(
-            "SELECT inventory_id,backend,target_generation FROM inventory_heads WHERE asset_id=?", (asset_id,)
-        ).fetchone()
-        return dict(row) if row else None
-
-    def inventory_head(self, asset_id):
-        row = self.connection.execute("SELECT inventory_id FROM inventory_heads WHERE asset_id=?", (asset_id,)).fetchone()
-        if row is None:
-            raise PolicyError("No inventory is available; collect or import this asset first")
-        return {"id": row[0], "body": self.get("inventory", row[0])}
-
-    def save_findings(self, body):
-        key = self.put("findings", body)
-        self.connection.execute("INSERT OR IGNORE INTO finding_sets VALUES (?,?,?)",
-                                (key, body.get("inventory_id"), body.get("source_digest")))
-        for finding in body["findings"]:
-            if digest({k: v for k, v in finding.items() if k != "id"}) != finding["id"]:
-                raise ValidationError("Finding failed its content hash check")
-            self.connection.execute("INSERT OR IGNORE INTO finding_index VALUES (?,?)", (finding["id"], key))
-        return key
-
-    def finding(self, key):
-        content_id(key)
-        row = self.connection.execute("SELECT set_id FROM finding_index WHERE finding_id=?", (key,)).fetchone()
-        if row is None:
-            raise ValidationError("Finding does not exist or is not plannable; run triage first")
-        body = self.get("findings", row[0])
-        for finding in body["findings"]:
-            if finding["id"] == key:
-                if digest({k: v for k, v in finding.items() if k != "id"}) != key:
-                    raise ValidationError("Finding failed its content hash check")
-                return finding
-        raise ValidationError("Finding index does not match its immutable set")
-
-    def save_plan(self, body):
-        key = self.put("plan", body)
-        self.connection.execute("INSERT OR IGNORE INTO plan_status VALUES (?, 'pending')", (key,))
-        return self.plan(key)
-
-    def plan(self, key):
-        body = self.get("plan", key)
-        row = self.connection.execute("SELECT status FROM plan_status WHERE plan_id=?", (key,)).fetchone()
-        if row is None:
-            raise ValidationError("Plan status is missing")
-        return {"id": key, "body": body, "status": row[0]}
-
-    def plans(self):
-        return [self.plan(row[0]) for row in self.connection.execute("SELECT plan_id FROM plan_status ORDER BY rowid")]
-
-    def set_status(self, key, status, *, expected):
-        self._writing()
-        if status not in _STATUSES or not expected or any(item not in _STATUSES for item in expected):
-            raise ValidationError("Unsupported plan status transition")
-        placeholders = ",".join("?" for _ in expected)
-        changed = self.connection.execute(
-            f"UPDATE plan_status SET status=? WHERE plan_id=? AND status IN ({placeholders})", (status, key, *expected)
-        ).rowcount
-        if changed != 1:
-            raise PolicyError("Plan status changed or is final; inspect the queue and create a new plan")
-
-    def approve(self, body):
-        self._writing()
-        key = self.put("approval", body)
-        self.connection.execute(
-            "INSERT INTO approval_heads VALUES (?,?) ON CONFLICT(plan_id) DO UPDATE SET approval_id=excluded.approval_id",
-            (body["plan_id"], key),
-        )
-        self.set_status(body["plan_id"], "approved", expected=("pending", "approved"))
-        return key
-
-    def approval(self, plan_id):
-        row = self.connection.execute("SELECT approval_id FROM approval_heads WHERE plan_id=?", (plan_id,)).fetchone()
-        return self.get("approval", row[0]) if row else None
-
-    def claim(self, plan_id, at, *, expected):
-        self._writing()
-        self.set_status(plan_id, "executing", expected=expected)
-        self.event(at, "execution-start", {"plan_id": plan_id})
-
-    def save_outcome(self, plan_id, status, result, inventory_id, at, *, expected=("executing",)):
-        self._writing()
-        self.set_status(plan_id, status, expected=expected)
-        body = {"plan_id": plan_id, "status": status, "result": result, "inventory_id": inventory_id}
-        self.connection.execute("INSERT INTO outcomes VALUES (?,?,?,?)", (plan_id, canonical(body), digest(body), inventory_id))
-        self.event(at, "execution-outcome", {"plan_id": plan_id, "status": status, "reason": result["reason"]})
-        return body
-
-    def outcome(self, plan_id):
-        row = self.connection.execute("SELECT body,digest FROM outcomes WHERE plan_id=?", (plan_id,)).fetchone()
-        if row is None:
-            return None
-        body = load_json(row["body"])
-        if digest(body) != row["digest"]:
-            raise ValidationError("Execution outcome failed its content hash check")
-        return body
-
-    def prune(self):
-        """Delete unreferenced evidence objects inside the caller's transaction.
-
-        Retained: source heads and every plan's source snapshot; findings sets
-        referenced by a plan, or built from a current inventory head and the
-        current Ubuntu head; inventory heads and every inventory named by a
-        plan, outcome or retained findings set. Returns deleted counts by kind.
-        """
-        self._writing()
-        plans = [self.get("plan", row[0]) for row in self.connection.execute("SELECT plan_id FROM plan_status")]
-        keep_sources = {row[0] for row in self.connection.execute(
-            "SELECT snapshot_id FROM source_health WHERE snapshot_id IS NOT NULL")}
-        keep_sources |= {plan["source_digest"] for plan in plans if "source_digest" in plan}
-        heads = {row[0] for row in self.connection.execute("SELECT inventory_id FROM inventory_heads")}
-        ubuntu = self.connection.execute("SELECT snapshot_id FROM source_health WHERE source='ubuntu'").fetchone()
-        current_source = ubuntu[0] if ubuntu else None
-        keep_sets = set()
-        for plan in plans:
-            if "finding_id" in plan:
-                row = self.connection.execute("SELECT set_id FROM finding_index WHERE finding_id=?",
-                                              (plan["finding_id"],)).fetchone()
-                if row:
-                    keep_sets.add(row[0])
-        for set_id, inventory_id, source_digest in self.connection.execute(
-                "SELECT set_id, inventory_id, source_digest FROM finding_sets"):
-            if current_source is not None and source_digest == current_source and inventory_id in heads:
-                keep_sets.add(set_id)
-        keep_inventories = set(heads)
-        keep_inventories |= {plan["inventory_id"] for plan in plans if "inventory_id" in plan}
-        keep_inventories |= {row[0] for row in self.connection.execute(
-            "SELECT inventory_id FROM outcomes WHERE inventory_id IS NOT NULL")}
-        for set_id, inventory_id in self.connection.execute("SELECT set_id, inventory_id FROM finding_sets"):
-            if set_id in keep_sets and inventory_id is not None:
-                keep_inventories.add(inventory_id)
-        deleted = {}
-        candidates = {kind: [row[0] for row in self.connection.execute("SELECT id FROM objects WHERE kind=?", (kind,))]
-                      for kind in _PRUNABLE}
-        keep = {"source": keep_sources, "findings": keep_sets, "inventory": keep_inventories}
-        for kind in ("findings", "source", "inventory"):
-            doomed = [key for key in candidates[kind] if key not in keep[kind]]
-            for key in doomed:
-                if kind == "findings":
-                    self.connection.execute("DELETE FROM finding_index WHERE set_id=?", (key,))
-                    self.connection.execute("DELETE FROM finding_sets WHERE set_id=?", (key,))
-                self.connection.execute("DELETE FROM objects WHERE id=? AND kind=?", (key, kind))
-                self._verified.pop(key, None)
-            deleted[kind] = len(doomed)
-        return deleted
-
-    def event(self, at, event, details):
-        self._writing()
-        integer(at, "audit time")
-        identifier(event, "audit event")
-        encoded = canonical(details)
-        if len(encoded) > 16384:
-            raise ValidationError("Audit details exceed the supported size")
-        self.connection.execute("INSERT INTO audit(at,event,details) VALUES (?,?,?)", (at, event, encoded))
-
-    def audit(self):
-        return [{"id": row["id"], "at": row["at"], "event": row["event"], "details": load_json(row["details"])}
-                for row in self.connection.execute("SELECT * FROM audit ORDER BY id")]

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autoprotect"
-version = "0.1.0"
-description = "Local security-advisory triage and policy-authorized remediation"
+version = "0.2.0"
+description = "Small local vulnerability and update tracker for machines and environments"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
