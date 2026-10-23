@@ -1,4 +1,6 @@
-# Autoprotect
+# netwatch
+
+Licensed under the [Apache License, Version 2.0](LICENSE) (`Apache-2.0`).
 
 A small Python CLI and SQLite database for **tracking maintained environments, checking relevant security advisories and available updates, and recording human-approved updates**. No server, resident host agent, plugin framework or model dependency.
 
@@ -10,7 +12,7 @@ Python 3.12+ is required on the control machine. Runtime dependencies: standard 
 
 ```bash
 python3 -m pip install .
-autoprotect demo
+netwatch demo
 ```
 
 The demo uses temporary SQLite state and a fake package manager. It demonstrates an affected package, denied execution without approval, an approved update, recollection and change history. It performs no network requests or real package operations.
@@ -20,14 +22,14 @@ The demo uses temporary SQLite state and a fake package manager. It demonstrates
 These examples **only register targets**; substitute your actual SSH aliases and absolute paths. A single machine can have several environments.
 
 ```bash
-autoprotect add server-os ubuntu --host my-server
-autoprotect add workstation-os cachyos --host my-workstation
-autoprotect add arch-os arch --host my-arch-host
-autoprotect add training mamba --host my-server --path /opt/conda/envs/training
-autoprotect add analysis conda --path /home/me/miniconda3/envs/analysis
-autoprotect add api uv --host my-server --path /srv/api
-autoprotect add frontend npm --path /home/me/projects/frontend
-autoprotect list
+netwatch add server-os ubuntu --host my-server
+netwatch add workstation-os cachyos --host my-workstation
+netwatch add arch-os arch --host my-arch-host
+netwatch add training mamba --host my-server --path /opt/conda/envs/training
+netwatch add analysis conda --path /home/me/miniconda3/envs/analysis
+netwatch add api uv --host my-server --path /srv/api
+netwatch add frontend npm --path /home/me/projects/frontend
+netwatch list
 ```
 
 `local` is the default host. Host values are explicit SSH aliases or `user@host`, never discovered addresses. SSH uses batch mode and normal configured host-key checking. Paths are safely quoted. Registered names cannot be overwritten; use a new name when replacing an environment so its history stays separate.
@@ -35,12 +37,12 @@ autoprotect list
 ## Check and query
 
 ```bash
-autoprotect check server-os           # collect inventory, advisories and updates
-autoprotect check                     # check every registered environment independently
-autoprotect check server-os --refresh # force a fresh advisory fetch
-autoprotect status                    # cached reports; no connections
-autoprotect --json status server-os   # full report for an agent
-autoprotect --json history --since 0  # events and the next cursor
+netwatch check server-os           # collect inventory, advisories and updates
+netwatch check                     # check every registered environment independently
+netwatch check server-os --refresh # force a fresh advisory fetch
+netwatch status                    # cached reports; no connections
+netwatch --json status server-os   # full report for an agent
+netwatch --json history --since 0  # events and the next cursor
 ```
 
 Reports contain installed packages, affected or uncertain findings, advisory links/fix versions, available package-manager updates, evidence timestamps, coverage warnings, collection status and pending/uncertain update attempts. Findings retain first/last-seen times. Changes are logged separately from routine checks. `history` returns at most 1,000 events; pass its `next_cursor` to read the next page. Reads are non-destructive: the agent keeps its own cursor and can retry a read.
@@ -69,11 +71,11 @@ No adapter declares an environment universally safe. The Arch tracker may lag cu
 **This is an operator tool, not a privilege-separation service.** The database owner, project files, package-manager configuration and installed tools are trusted. Keep an agent's account read/collection-only, including read-only project permissions and no administrator credentials. An agent with administrator access or write access to this database cannot be restrained by an `--actor` label or a CLI flag; there is no such claim here.
 
 ```bash
-autoprotect preview server-os
+netwatch preview server-os
 # Read the returned plan ID, commands, observed updates and scope.
-autoprotect apply 1 --yes   # replace 1 with the plan ID you reviewed
-autoprotect status server-os
-autoprotect history --name server-os
+netwatch apply 1 --yes   # replace 1 with the plan ID you reviewed
+netwatch status server-os
+netwatch history --name server-os
 ```
 
 Approval covers **updating the entire named environment**, not an immutable list of exact versions. Repository state can change between preview and execution, and Ubuntu refreshes indexes at apply time. Packages, dependencies, scripts and services may change. If you require exact transaction approval, inspect and perform the package-manager operation manually instead. This tool does not provide exact artifact pinning, a sandbox, rollback or automatic restart orchestration.
@@ -85,24 +87,24 @@ OS updates use `sudo -n`; the invoking administrator must already have suitable 
 If a command fails, times out or verification cannot collect inventory, the plan becomes `needs_attention`. Abrupt process death leaves it `running`; disconnecting SSH does not prove remote work stopped. New updates to that registered environment are blocked until you inspect the actual processes and package state:
 
 ```bash
-autoprotect resolve 1 --note 'Confirmed update stopped; inspected and repaired package state'
+netwatch resolve 1 --note 'Confirmed update stopped; inspected and repaired package state'
 ```
 
 Resolution is your recovery attestation, not a rollback or success verdict. Make a fresh preview before another attempt. Registering the same actual machine through multiple aliases does not coordinate updates; use one canonical alias and serialize operator maintenance. The application does not protect against another administrator changing a target concurrently.
 
 ## Local storage and extension
 
-Default database: `~/.local/state/autoprotect/state.db`, mode 600. Use `--db /absolute/path/state.db` **before** the command to select another. It stores targets, scans, findings, update previews/results, cursor events and cached evidence. SQLite transactions make local event/claim writes atomic. Raw subprocess output is not retained because it can contain credentials; command names, outcomes and relevant normalized observations are recorded. The database can contain private inventories: protect and back it up. History is local recordkeeping, not tamper-proof auditing. No automatic retention or pruning is performed yet.
+Default database: `~/.local/state/netwatch/state.db`, mode 600. Use `--db /absolute/path/state.db` **before** the command to select another. It stores targets, scans, findings, update previews/results, cursor events and cached evidence. SQLite transactions make local event/claim writes atomic. Raw subprocess output is not retained because it can contain credentials; command names, outcomes and relevant normalized observations are recorded. The database can contain private inventories: protect and back it up. History is local recordkeeping, not tamper-proof auditing. No automatic retention or pruning is performed yet.
 
-The replacement uses schema 10 and refuses older application databases. Keep old databases separately; use a new path. Git and the immutable [worklog](worklog/README.md) retain development history. The previous custom executor, policy framework and demos have been removed, not silently migrated.
+The rename does not move or delete existing databases. Pass their existing path with `netwatch --db /absolute/path/state.db status` to continue using schema-10 state. The replacement uses schema 10 and refuses older application databases. Keep old databases separately; use a new path. Git and the immutable [worklog](worklog/README.md) retain development history. The previous custom executor, policy framework and demos have been removed, not silently migrated.
 
-To add an ecosystem, add a collection function to `autoprotect/adapters.py`, an update-discovery branch and a fixed command list; add advisory matching in `sources.py` only if a reliable source exists. Add fixture tests for success and failure. There is no registration framework or inheritance hierarchy.
+To add an ecosystem, add a collection function to `netwatch/adapters.py`, an update-discovery branch and a fixed command list; add advisory matching in `sources.py` only if a reliable source exists. Add fixture tests for success and failure. There is no registration framework or inheritance hierarchy.
 
 ## Verification
 
 ```bash
 python3 -B -m unittest discover -s tests -v
-python3 -B -m autoprotect --json demo
+python3 -B -m netwatch --json demo
 python3 -B scripts/check_package.py
 python3 -B scripts/worklog.py check
 python3 -B scripts/worklog.py render

@@ -11,10 +11,10 @@ from .store import Store
 
 
 def parser():
-    p = argparse.ArgumentParser(description="Track environments, security advisories and human-approved updates.")
-    p.add_argument("--db", default=os.path.expanduser("~/.local/state/autoprotect/state.db"))
+    p = argparse.ArgumentParser(prog="netwatch", description="Track environments, security advisories and human-approved updates.")
+    p.add_argument("--db", default=os.path.expanduser("~/.local/state/netwatch/state.db"))
     p.add_argument("--json", action="store_true", help="machine-readable JSON (all strings escaped)")
-    p.add_argument("--version", action="version", version="autoprotect 0.2.0")
+    p.add_argument("--version", action="version", version="netwatch 0.2.0")
     commands = p.add_subparsers(dest="command", required=True)
     add = commands.add_parser("add", help="register one OS, environment or project; does not connect")
     add.add_argument("name")

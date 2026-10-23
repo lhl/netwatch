@@ -21,7 +21,7 @@ def fetch(url, body=None):
     if url not in (USN, ARCH, OSV):
         raise Error("Unknown advisory endpoint")
     request = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
-                                     headers={"User-Agent": "autoprotect/0.2", "Content-Type": "application/json",
+                                     headers={"User-Agent": "netwatch/0.2", "Content-Type": "application/json",
                                               "Accept-Encoding": "identity"})
     limit = 512 * 1024 * 1024 if url == USN else 20 * 1024 * 1024
     start, chunks, size = time.monotonic(), [], 0

@@ -41,7 +41,7 @@ class DemoRunner:
 
 
 def demo():
-    with tempfile.TemporaryDirectory(prefix="autoprotect-demo-") as root:
+    with tempfile.TemporaryDirectory(prefix="netwatch-demo-") as root:
         store = Store(Path(root) / "state.db")
         try:
             t, runner = adapters.target("demo", "ubuntu"), DemoRunner()

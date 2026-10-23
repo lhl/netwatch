@@ -23,6 +23,8 @@ htmlcov/
 /dist/
 
 # Local runtime data and credentials; use synthetic fixtures in tests
+/.netwatch/
+# Keep previous local runtime data ignored; renaming must not expose it.
 /.autoprotect/
 /state/
 /local/

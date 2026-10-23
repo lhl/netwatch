@@ -3,15 +3,17 @@ requires = ["setuptools==83.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "autoprotect"
+name = "netwatch"
 version = "0.2.0"
 description = "Small local vulnerability and update tracker for machines and environments"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = []
 
 [project.scripts]
-autoprotect = "autoprotect.cli:main"
+netwatch = "netwatch.cli:main"
 
 [tool.setuptools]
-packages = ["autoprotect"]
+packages = ["netwatch"]

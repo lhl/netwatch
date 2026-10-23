@@ -1,7 +1,7 @@
 import unittest
 
-from autoprotect.core import ValidationError
-from autoprotect.versions import compare_versions
+from netwatch.core import ValidationError
+from netwatch.versions import compare_versions
 
 
 # Native dpkg differential verification uses the same cases, plus generated

@@ -7,11 +7,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from autoprotect import adapters, sources, workflow
-from autoprotect.cli import main
-from autoprotect.core import Error, canonical
-from autoprotect.demo import DemoRunner, NOTICE, demo
-from autoprotect.store import Store
+from netwatch import adapters, sources, workflow
+from netwatch.cli import main
+from netwatch.core import Error, canonical
+from netwatch.demo import DemoRunner, NOTICE, demo
+from netwatch.store import Store
 
 
 class WorkflowTests(unittest.TestCase):
@@ -77,9 +77,9 @@ class WorkflowTests(unittest.TestCase):
                 calls = []
                 runner = lambda t, argv, **kw: calls.append(argv) or "no\n"
                 packages = [adapters.package("test", "1", "Conda")]
-                with patch("autoprotect.adapters.inventory", return_value=packages), \
-                     patch("autoprotect.adapters.updates", return_value=[]), \
-                     patch("autoprotect.sources.assess", return_value=([], [], True, [])):
+                with patch("netwatch.adapters.inventory", return_value=packages), \
+                     patch("netwatch.adapters.updates", return_value=[]), \
+                     patch("netwatch.sources.assess", return_value=([], [], True, [])):
                     p = workflow.preview(self.store, t, runner)
                     result = workflow.apply(self.store, p["id"], yes=True, runner=runner)
                 self.assertEqual(calls[:len(adapters.commands(t))], adapters.commands(t))
@@ -124,7 +124,7 @@ class WorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(Error, "changed"):
             workflow.apply(self.store, p["id"], yes=True, runner=self.runner)
         self.runner.version = "1.0-1"
-        with patch("autoprotect.workflow.time.time", return_value=p["expires_at"]):
+        with patch("netwatch.workflow.time.time", return_value=p["expires_at"]):
             with self.assertRaisesRegex(Error, "expired"):
                 workflow.apply(self.store, p["id"], yes=True, runner=self.runner)
 
@@ -232,7 +232,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_ssh_quoting_and_fixed_host(self):
         t = adapters.target("app", "npm", "user@host", "/srv/a';touch bad;'")
-        with patch("autoprotect.adapters.subprocess.Popen") as popen:
+        with patch("netwatch.adapters.subprocess.Popen") as popen:
             popen.return_value.communicate.return_value = (b'{}', b'')
             popen.return_value.returncode = 0
             adapters.run(t, ["npm", "ls", "--all", "--json"])

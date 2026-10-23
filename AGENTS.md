@@ -1,6 +1,6 @@
 # Agent guide
 
-Autoprotect is a small Python/SQLite CLI for maintained environments, cached advisory checks, agent-readable status and human-approved package-manager updates. Prefer fewer functions and files over frameworks. User instructions override this guide. Do not use subagents unless the user explicitly changes that direction.
+netwatch is a small Python/SQLite CLI for maintained environments, cached advisory checks, agent-readable status and human-approved package-manager updates. Prefer fewer functions and files over frameworks. User instructions override this guide. Do not use subagents unless the user explicitly changes that direction.
 
 ## Work
 
@@ -24,7 +24,7 @@ Run affected tests first. For integrated changes:
 
 ```bash
 python3 -B -m unittest discover -s tests -v
-python3 -B -m autoprotect --json demo
+python3 -B -m netwatch --json demo
 python3 -B scripts/check_package.py
 python3 -B scripts/worklog.py check
 python3 -B scripts/worklog.py render

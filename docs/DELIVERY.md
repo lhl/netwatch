@@ -19,6 +19,13 @@ The user directed replacement of the previous implementation with the simplest u
 - [x] Self-review parsing, SSH quoting, approval, interrupted operations and failed-source handling. No independent review: the user explicitly prohibited subagents.
 - [x] Record results/limitations in an append-only worklog entry; stage exact files, commit, inspect final status. No push, deployment, private inventory collection or real package changes.
 
+## Project rename and licensing
+
+- [x] Rename the package, module, CLI, metadata, documentation and test references to `netwatch`; keep Git/worklog history unchanged.
+- [x] Use `~/.local/state/netwatch/state.db` by default without moving or deleting existing databases. Existing schema-10 state remains usable through `--db`; keep the previous local-data ignore rule for safety.
+- [x] Add the unmodified Apache License 2.0 text and SPDX `Apache-2.0` metadata. Include the license in wheel/source distributions and link it from README.
+- [x] Run 47 tests, renamed module/demo and installed packaging checks, including license bytes and metadata. Record the worklog and commit; no publication or remote-repository change.
+
 ## Operational qualification still required
 
 No actual machine list/access was supplied for operations. Fixture coverage is not a live rollout. Before use for updates, qualify each applicable package-manager version, credentials, project layout and recovery procedure on explicitly authorized disposable systems. Conda-native advisory coverage and authoritative CachyOS matching are not implemented; those environments still support inventory and update workflows with visible uncertainty.
