@@ -1,11 +1,25 @@
-# Minimal replacement contract
+# Design
 
-This replaces the previous runtime, not its Git/worklog history. One Python CLI and one private SQLite database manage explicit local or SSH environments: Ubuntu, Arch/CachyOS, conda/mamba, uv and npm. Adapters are plain functions selected by a dictionary, not plugins or services.
+netwatch runs package tools locally or over SSH and stores observations in SQLite.
 
-Required loop: register → inventory → cached advisory/update check → query changes → preview → explicitly approve/apply → recollect and report. Store every attempt and retain previous findings on failure. Reports distinguish affected, investigation required, missing coverage, available updates, and verified package changes. An empty advisory result is not proof of safety.
+| Module | Responsibility |
+| --- | --- |
+| `adapters.py` | Collect installed packages, discover available updates and define update commands. |
+| `sources.py` | Fetch and cache advisory data; match it against installed packages. |
+| `store.py` | Store registrations, scans, findings, events and update attempts. |
+| `workflow.py` | Check environments, save previews, apply approved updates and record results. |
+| `cli.py` | Parse commands and present text or JSON results. |
 
-Use Canonical USNs for Ubuntu noble; Arch tracker records as limited evidence (CachyOS rebuilds stay uncertain); OSV exact-version queries for installed PyPI/npm packages. Conda-native packages have unknown advisory coverage; their update availability remains useful. Do not map conda names to PyPI by guesswork. Network queries disclose package names/versions and are explicit through `check`; `--offline` requires fresh cached evidence.
+## Behavior to preserve
 
-Update the whole selected environment through its package manager, never execute feed text or feed-selected versions. Human approval binds a stored preview, target and inventory; changed inventory invalidates it. Arch uses full system upgrades, not partial package updates. Log start before execution and never automatically replay an interrupted attempt. Failed/partial updates need operator attention. Package-manager scripts run with the operator's authority; this is not a sandbox or a privilege-separation service. Agent accounts should only have read/collection access; an agent with administrator credentials cannot be constrained by this CLI.
+- Collect only registered environments. Commands come from adapter definitions; advisory text cannot supply commands or repositories.
+- Match Ubuntu notices using Noble source versions and binary membership. Use OSV for installed PyPI/npm packages. Keep uncertain Arch/CachyOS matches and missing conda-native coverage visible.
+- Retain earlier findings when collection or advisory requests fail. Record changes separately from routine checks.
+- A preview binds the target, inventory and environment-wide command list. Changed inventory or an expired preview requires a new preview. Repository candidates can change before execution.
+- Record approval and start before running updates. Recollect afterward and report remaining findings separately from command completion.
+- Block another attempt while an update is running or needs attention. Recovery records the operator's note and invalidates outstanding previews.
+- Operator filesystem and SSH permissions control access. Keep agent accounts read-only.
 
-No live system changes during development. Verify with injected command/network runners, synthetic fixtures, temporary SQLite files and a CLI demo. No subagents. Keep application code small; use standard library where practical. Proposed adapters do not count as implemented until collection, update discovery, preview and apply paths have tests.
+## Development checks
+
+Use injected command runners, synthetic responses and temporary databases for tests. Test each adapter's collection, update discovery and apply paths. Live operations require explicit target authorization.

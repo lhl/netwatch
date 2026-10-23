@@ -1,6 +1,6 @@
-# Delivery checklist: small replacement
+# Delivery checklist
 
-The user directed replacement of the previous implementation with the simplest useful Python/SQLite system, covering actual Ubuntu, Arch/CachyOS, conda/mamba, uv and npm environments. No subagents, services or plugin framework. Historical delivery and review evidence remains in Git and immutable worklog entries, not as claims about this replacement.
+Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv and npm environments. Development history is recorded in the worklog.
 
 ## Required workflow
 
@@ -32,6 +32,12 @@ The user directed replacement of the previous implementation with the simplest u
 - [x] Recheck 47 tests, installed packaging/demo, Apache 2.0 artifacts and worklog integrity.
 - [x] Create public [`lhl/netwatch`](https://github.com/lhl/netwatch), publish main only, and verify visibility, Apache-2.0 recognition and remote/local commit equality. Preserve history; no force push.
 
-## Operational qualification still required
+## End-user documentation
 
-No actual machine list/access was supplied for operations. Fixture coverage is not a live rollout. Before use for updates, qualify each applicable package-manager version, credentials, project layout and recovery procedure on explicitly authorized disposable systems. Conda-native advisory coverage and authoritative CachyOS matching are not implemented; those environments still support inventory and update workflows with visible uncertainty.
+- [x] Rewrite README with a short description, concrete feature bullets, quick start and usage examples; place License last.
+- [x] Move command/reference details into `docs/USAGE.md`; remove defensive boilerplate and obsolete implementation history from active prose.
+- [x] Apply clear-writing and anti-slop passes using the supplied writing guidance. Verify 12 shell blocks, 23 CLI examples and 8 local links/anchors, plus the simulated workflow and installed package demo.
+
+## Before using live updates
+
+Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.
