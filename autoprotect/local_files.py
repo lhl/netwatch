@@ -16,7 +16,7 @@ import stat
 from .core import ValidationError, integer
 
 
-_MAX_BYTES = 128 * 1024 * 1024
+_MAX_BYTES = 512 * 1024 * 1024
 
 
 def _owner(live: bool) -> int:

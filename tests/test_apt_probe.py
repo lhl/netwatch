@@ -14,11 +14,11 @@ from unittest.mock import Mock, patch
 
 from autoprotect import _apt_probe as probe
 
-KEY = "/usr/share/keyrings/debian-archive-keyring.gpg"
-SOURCE = f"deb [arch=amd64 signed-by={KEY}] https://deb.example.invalid/debian trixie main\n"
-SOURCES = [{"uri": "https://deb.example.invalid/debian/", "suite": "trixie", "components": ["main"], "key": KEY}]
-ORIGIN = {"origin": "Debian", "label": "Debian", "archive": "stable", "codename": "trixie", "component": "main", "site": "deb.example.invalid"}
-RELEASE = {"codename": "trixie", "date": 1_800_000_000, "valid_until": None}
+KEY = "/usr/share/keyrings/ubuntu-archive-keyring.gpg"
+SOURCE = f"deb [arch=amd64 signed-by={KEY}] https://archive.example.invalid/ubuntu noble main\n"
+SOURCES = [{"uri": "https://archive.example.invalid/ubuntu/", "suite": "noble", "components": ["main"], "key": KEY}]
+ORIGIN = {"origin": "Ubuntu", "label": "Ubuntu", "archive": "noble", "codename": "noble", "component": "main", "site": "archive.example.invalid"}
+RELEASE = {"codename": "noble", "date": 1_800_000_000, "valid_until": None}
 CONTROL = "Package: widget\nVersion: 1:2.0-1+b1\nArchitecture: amd64\nSource: widget-src (1:2.0-1)\n"
 RECORD = CONTROL + "SHA256: " + "a" * 64 + "\nSize: 123\nFilename: pool/main/w/widget/widget_2.0-1+b1_amd64.deb\n"
 
@@ -26,21 +26,21 @@ RECORD = CONTROL + "SHA256: " + "a" * 64 + "\nSize: 123\nFilename: pool/main/w/w
 class SourceTests(unittest.TestCase):
     def test_list_and_deb822_exact_signed_by_sources(self):
         self.assertEqual(probe.parse_sources(SOURCE, deb822=False), SOURCES)
-        deb822 = ("# configured locally\nTypes: deb\nURIs: https://deb.example.invalid/debian\nSuites: trixie\n"
+        deb822 = ("# configured locally\nTypes: deb\nURIs: https://archive.example.invalid/ubuntu\nSuites: noble\n"
                   f"Components: main\nArchitectures: amd64\nSigned-By: {KEY}\n")
         self.assertEqual(probe.parse_sources(deb822, deb822=True), SOURCES)
         for content, format822 in ((SOURCE, False), (deb822, True)):
             with self.subTest(deb822=format822):
                 self.assertEqual(probe.parse_sources(content.replace("keyring.gpg", "keyring.asc"), deb822=format822),
                                  [dict(SOURCES[0], key=KEY.replace(".gpg", ".asc"))])
-        self.assertEqual(len(probe.parse_sources(deb822.replace("Suites: trixie", "Suites: trixie trixie-updates"), deb822=True)), 2)
+        self.assertEqual(len(probe.parse_sources(deb822.replace("Suites: noble", "Suites: noble noble-updates"), deb822=True)), 2)
 
     def test_reject_source_authentication_and_date_overrides(self):
         for option in ("trusted=yes", "allow-insecure=yes", "allow-weak=yes", "check-valid-until=no", "check-date=no", "arch=arm64"):
             with self.subTest(option=option), self.assertRaises(probe.ProbeError):
                 probe.parse_sources(SOURCE.replace("]", " " + option + "]"), deb822=False)
         for extra in ("Trusted: yes", "Check-Valid-Until: no", "Allow-Insecure: yes", "Enabled: maybe", "Signed-By: /tmp/key.gpg"):
-            content = f"Types: deb\nURIs: https://deb.example.invalid/debian\nSuites: trixie\nComponents: main\nSigned-By: {KEY}\n{extra}\n"
+            content = f"Types: deb\nURIs: https://archive.example.invalid/ubuntu\nSuites: noble\nComponents: main\nSigned-By: {KEY}\n{extra}\n"
             with self.subTest(extra=extra), self.assertRaises(probe.ProbeError):
                 probe.parse_sources(content, deb822=True)
 
@@ -49,29 +49,30 @@ class SourceTests(unittest.TestCase):
                  SOURCE.replace(KEY, "/usr/share/keyrings/../key.gpg"), SOURCE.replace("https:", "ftp:"),
                  SOURCE.replace("invalid/", "invalid:8080/"), SOURCE.replace("https:", "http:").replace("invalid/", "invalid:443/"),
                  SOURCE.replace("keyring.gpg", "keyring.key"),
-                 SOURCE.replace("trixie", "stable"), SOURCE.replace("trixie", "sid"), SOURCE.replace("deb [", "deb-src[ "),
-                 SOURCE.replace("deb.example.invalid", "user:password@deb.example.invalid"),
-                 SOURCE.replace("/debian trixie", "/debian?custom=yes trixie"),
+                 SOURCE.replace("noble", "stable"), SOURCE.replace("noble", "jammy"), SOURCE.replace("deb [", "deb-src[ "),
+                 SOURCE.replace("archive.example.invalid", "user:password@archive.example.invalid"),
+                 SOURCE.replace("/ubuntu noble", "/ubuntu?custom=yes noble"),
                  SOURCE.replace(" main", " main;touch /tmp/unsafe"), SOURCE.replace("https:", "file:")]
         for content in cases:
             with self.subTest(content=content), self.assertRaises((probe.ProbeError, ValueError)):
                 probe.parse_sources(content, deb822=False)
 
-    def test_stock_trixie_sources_signed_http_pgp_keys_and_source_indexes(self):
-        # The shape Debian 13 installs: plain HTTP mirrors (authenticated by
-        # signed InRelease, not transport), a .pgp keyring and a comment.
-        stock = ("Types: deb\n# http://snapshot.debian.org/archive/debian/20261020T213255Z\n"
-                 "URIs: http://deb.debian.org/debian\nSuites: trixie trixie-updates\nComponents: main\n"
-                 "Signed-By: /usr/share/keyrings/debian-archive-keyring.pgp\n\n"
-                 "Types: deb\nURIs: http://deb.debian.org/debian-security\nSuites: trixie-security\n"
-                 "Components: main\nSigned-By: /usr/share/keyrings/debian-archive-keyring.pgp\n")
+    def test_noble_sources_signed_http_keyring_and_source_indexes(self):
+        # Ubuntu's deb822 source shape, limited to the supported pockets.
+        # HTTP metadata still requires signature and index-hash verification.
+        stock = ("Types: deb\n# reviewed Ubuntu archive sources\n"
+                 "URIs: http://archive.ubuntu.com/ubuntu\nSuites: noble noble-updates\n"
+                 "Components: main restricted universe multiverse\n"
+                 "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n\n"
+                 "Types: deb\nURIs: http://security.ubuntu.com/ubuntu\nSuites: noble-security\n"
+                 "Components: main restricted universe multiverse\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n")
         entries = probe.parse_sources(stock, deb822=True)
         self.assertEqual([(entry["uri"], entry["suite"]) for entry in entries], [
-            ("http://deb.debian.org/debian/", "trixie"), ("http://deb.debian.org/debian/", "trixie-updates"),
-            ("http://deb.debian.org/debian-security/", "trixie-security")])
-        self.assertTrue(all(entry["key"].endswith(".pgp") for entry in entries))
+            ("http://archive.ubuntu.com/ubuntu/", "noble"), ("http://archive.ubuntu.com/ubuntu/", "noble-updates"),
+            ("http://security.ubuntu.com/ubuntu/", "noble-security")])
+        self.assertTrue(all(entry["key"] == KEY for entry in entries))
         self.assertEqual(probe.parse_sources(SOURCE.replace("https:", "http:"), deb822=False)[0]["uri"],
-                         "http://deb.example.invalid/debian/")
+                         "http://archive.example.invalid/ubuntu/")
         self.assertEqual(probe.parse_sources(SOURCE.replace("deb [", "deb-src ["), deb822=False), [])
         both = stock.replace("Types: deb\n", "Types: deb deb-src\n", 1)
         self.assertEqual(probe.parse_sources(both, deb822=True), entries)
@@ -80,6 +81,17 @@ class SourceTests(unittest.TestCase):
         for types in ("Types: deb-src deb-src\n", "Types: rpm\n", "Types:\n"):
             with self.subTest(types=types), self.assertRaises(probe.ProbeError):
                 probe.parse_sources(stock.replace("Types: deb\n", types, 1), deb822=True)
+
+    def test_unsupported_pockets_and_pro_esm_sources_are_rejected(self):
+        for suite in ("noble-backports", "noble-proposed", "jammy", "noble-apps-security", "noble-infra-updates"):
+            with self.subTest(suite=suite), self.assertRaises(probe.ProbeError):
+                probe.parse_sources(SOURCE.replace(" noble ", f" {suite} "), deb822=False)
+        for uri, suite in (("https://esm.ubuntu.com/apps/ubuntu", "noble-apps-security"),
+                           ("https://esm.ubuntu.com/infra/ubuntu", "noble"),
+                           ("https://archive.example.invalid/ubuntu", "noble-esm-security")):
+            content = f"Types: deb\nURIs: {uri}\nSuites: {suite}\nComponents: main\nSigned-By: {KEY}\n"
+            with self.subTest(uri=uri, suite=suite), self.assertRaisesRegex(probe.ProbeError, "Pro/ESM"):
+                probe.parse_sources(content, deb822=True)
 
     def test_control_duplicate_casefold_and_malformed_data(self):
         for raw in ("Package: widget\npackage: other\n", " continuation\n", "Malformed\n", "Package: widget\x00\n"):
@@ -106,9 +118,10 @@ class SourceTests(unittest.TestCase):
             self.assertTrue(probe.control_identity(probe._single(CONTROL + field + ": yes\n"))["essential"])
 
     def test_release_dates_need_timezone_and_visible_expiry(self):
-        fields = {"codename": "trixie", "date": "Thu, 15 Jan 2026 12:00:00 UTC", "valid-until": "Thu, 22 Jan 2026 12:00:00 UTC"}
+        fields = {"codename": "noble", "date": "Thu, 15 Jan 2026 12:00:00 UTC", "valid-until": "Thu, 22 Jan 2026 12:00:00 UTC"}
         freshness = probe.release_freshness(fields)
         self.assertLess(freshness["date"], freshness["valid_until"])
+        self.assertIsNone(probe.release_freshness({k: v for k, v in fields.items() if k != "valid-until"})["valid_until"])
         for date in (None, "tomorrow", "Thu, 15 Jan 2026 12:00:00"):
             with self.subTest(date=date), self.assertRaises(probe.ProbeError):
                 probe.release_freshness(dict(fields, date=date))
@@ -221,8 +234,8 @@ class ConfigurationTests(unittest.TestCase):
             (root / "origins").mkdir(parents=True)
             root.chmod(0o755)
             (root / "origins").chmod(0o755)
-            (root / "origins" / "debian").write_bytes(b"Vendor: Debian\n")
-            (root / "origins" / "default").symlink_to("debian")
+            (root / "origins" / "ubuntu").write_bytes(b"Vendor: Ubuntu\n")
+            (root / "origins" / "default").symlink_to("ubuntu")
             (root / "keyring.pgp").write_bytes(b"key")
             (root / "keyring.gpg").symlink_to("keyring.pgp")
             (root / "linked-dir").symlink_to("origins")
@@ -276,13 +289,13 @@ class ConfigReportTests(unittest.TestCase):
         config = FakeConfig()
         apt_pkg = SimpleNamespace(init_config=Mock(), config=config,
                                   uri_to_filename=lambda uri: uri.removeprefix("https://").replace("/", "_"))
-        sources = [dict(SOURCES[0], components=["main", "contrib"]),
-                   {"uri": "https://security.example.invalid/debian-security/", "suite": "trixie-security",
+        sources = [dict(SOURCES[0], components=["main", "restricted"]),
+                   {"uri": "https://security.example.invalid/ubuntu/", "suite": "noble-security",
                     "components": ["main"], "key": KEY}]
-        fields = {"origin": "Debian", "label": "Debian", "suite": "stable", "codename": "trixie",
+        fields = {"origin": "Ubuntu", "label": "Ubuntu", "suite": "noble", "codename": "noble",
                   "date": "Thu, 15 Jan 2026 12:00:00 UTC"}
         def signed(_apt_pkg, source):
-            if source["suite"] == "trixie-security":
+            if source["suite"] == "noble-security":
                 raise FileNotFoundError("no local index yet")
             return fields
         with patch.object(probe, "_configuration", return_value=("c" * 64, sources)), \
@@ -294,7 +307,7 @@ class ConfigReportTests(unittest.TestCase):
         self.assertEqual(report["sources"][0]["key_sha256"], probe.hashlib.sha256(b"public key bytes").hexdigest())
         self.assertEqual(report["sources"][0]["release"], {"date": 1_768_478_400, "valid_until": None})
         self.assertIn("missing", report["sources"][1]["release"])
-        self.assertEqual(report["origins"], sorted([dict(ORIGIN, component="contrib"), ORIGIN], key=probe._canonical))
+        self.assertEqual(report["origins"], sorted([dict(ORIGIN, component="restricted"), ORIGIN], key=probe._canonical))
         apt_pkg.init_config.assert_called_once()
 
     def test_report_rejects_unsafe_effective_configuration(self):
@@ -305,10 +318,10 @@ class ConfigReportTests(unittest.TestCase):
 
 class SignedIndexTests(unittest.TestCase):
     def setUp(self):
-        self.filename = "deb.example.invalid_debian_dists_trixie_main_binary-amd64_Packages.lz4"
+        self.filename = "archive.example.invalid_ubuntu_dists_noble_main_binary-amd64_Packages.lz4"
         self.package_file = SimpleNamespace(filename="/var/lib/apt/lists/" + self.filename, **{k: ORIGIN[k] for k in ("origin", "label", "archive", "component", "site")})
         self.apt_pkg = SimpleNamespace(uri_to_filename=lambda uri: uri.removeprefix("https://").replace("/", "_"))
-        self.raw = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Debian\nLabel: Debian\nSuite: stable\nCodename: trixie\n"
+        self.raw = ("-----BEGIN PGP SIGNED MESSAGE-----\nHash: SHA256\n\nOrigin: Ubuntu\nLabel: Ubuntu\nSuite: noble\nCodename: noble\n"
                     "Date: Thu, 15 Jan 2026 12:00:00 UTC\nSHA256:\n " + "a" * 64 + " 100 main/binary-amd64/Packages\n"
                     "-----BEGIN PGP SIGNATURE-----\nsynthetic, not a real signature\n-----END PGP SIGNATURE-----\n").encode()
 
@@ -317,19 +330,42 @@ class SignedIndexTests(unittest.TestCase):
                 patch.object(probe, "_command") as command, patch.object(probe, "_index_hash", return_value=("a" * 64, 100)):
             origin, freshness = probe._verified_index(self.apt_pkg, self.package_file, SOURCES)
         self.assertEqual(origin, ORIGIN)
-        self.assertEqual(freshness["codename"], "trixie")
+        self.assertEqual(freshness["codename"], "noble")
         command.assert_called_once()
         home = command.call_args.kwargs["home"]
         self.assertEqual(command.call_args.args[0], ["/usr/bin/gpgv", "--homedir", str(home), "--keyring", KEY,
-                                                   "/var/lib/apt/lists/deb.example.invalid_debian_dists_trixie_InRelease"])
+                                                   "/var/lib/apt/lists/archive.example.invalid_ubuntu_dists_noble_InRelease"])
         self.assertFalse(home.exists())
+
+    def test_each_pocket_requires_matching_suite_but_common_noble_codename(self):
+        for suite in ("noble", "noble-updates", "noble-security"):
+            source = dict(SOURCES[0], suite=suite)
+            raw = self.raw.replace(b"Suite: noble\n", f"Suite: {suite}\n".encode())
+            with self.subTest(suite=suite), patch.object(probe, "_read", return_value=raw), \
+                    patch.object(probe, "_verify_release") as verify:
+                fields = probe._signed_release(self.apt_pkg, source)
+            self.assertEqual(fields["suite"], suite)
+            self.assertEqual(fields["codename"], "noble")
+            self.assertNotIn("valid-until", fields)
+            verify.assert_called_once()
+
+    def test_signed_identity_cannot_authorize_wrong_origin_suite_or_esm(self):
+        for old, new in ((b"Origin: Ubuntu", b"Origin: Other"), (b"Label: Ubuntu", b"Label: Other"),
+                         (b"Origin: Ubuntu", b"Origin: UbuntuESMApps"),
+                         (b"Label: Ubuntu", b"Label: UbuntuESMInfra"),
+                         (b"Suite: noble\n", b"Suite: noble-security\n"),
+                         (b"Suite: noble\n", b"Suite: noble-backports\n"),
+                         (b"Codename: noble", b"Codename: noble-security")):
+            with self.subTest(new=new), patch.object(probe, "_read", return_value=self.raw.replace(old, new)), \
+                    patch.object(probe, "_verify_release"), self.assertRaises(probe.ProbeError):
+                probe._signed_release(self.apt_pkg, SOURCES[0])
 
     def test_bad_signature_index_hash_size_codename_or_origin(self):
         for change in ("signature", "hash", "size", "codename", "origin", "missing-hash"):
             raw = self.raw
             file = copy.copy(self.package_file)
             if change == "codename":
-                raw = raw.replace(b"Codename: trixie", b"Codename: sid")
+                raw = raw.replace(b"Codename: noble", b"Codename: jammy")
             if change == "origin":
                 file.origin = "Unreviewed"
             if change == "missing-hash":
@@ -343,7 +379,7 @@ class SignedIndexTests(unittest.TestCase):
 
     def test_release_envelope_duplicate_checksums_and_unmapped_indexes(self):
         cases = [self.raw.replace(b"-----BEGIN PGP SIGNED MESSAGE-----", b"unsigned"),
-                 self.raw.replace(b"Codename: trixie", b"Codename: trixie\nCodename: sid"),
+                 self.raw.replace(b"Codename: noble", b"Codename: noble\nCodename: jammy"),
                  self.raw.replace(b"-----BEGIN PGP SIGNATURE-----", b" " + b"a" * 64 + b" 100 main/binary-amd64/Packages\n-----BEGIN PGP SIGNATURE-----")]
         for raw in cases:
             with patch.object(probe, "_safe_info"), patch.object(probe, "_read", return_value=raw), \
@@ -552,7 +588,7 @@ class RealSignatureTests(unittest.TestCase):
                 key = root / ("archive.gpg" if case == "key" else "archive.asc")
                 key.write_bytes(b"not a key" if case in ("armor", "key") else armored)
                 release = root / "InRelease"
-                release.write_bytes(signed.replace(b"Label: Debian", b"Label: Forged") if case == "signature" else signed)
+                release.write_bytes(signed.replace(b"Label: Ubuntu", b"Label: Forged") if case == "signature" else signed)
                 with self.subTest(case=case), patch.dict(os.environ, {"HOME": str(inherited), "GNUPGHOME": str(inherited)}), \
                         patch.object(probe, "_safe_info", side_effect=lambda p: p.lstat()), self.assertRaises(probe.ProbeError):
                     probe._verify_release(str(key), release)

@@ -3,17 +3,17 @@
     "name": "example-app",
     "architecture": "amd64",
     "from_version": "1.0-1",
-    "to_version": "1.0-1+deb13u1",
+    "to_version": "1.0-1ubuntu0.24.04.1",
     "source_name": "example-app",
-    "source_version": "1.0-1+deb13u1",
+    "source_version": "1.0-1ubuntu0.24.04.1",
     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "size": 1,
     "origins": [
       {
         "origin": "Synthetic",
         "label": "Synthetic",
-        "archive": "stable",
-        "codename": "trixie",
+        "archive": "noble-security",
+        "codename": "noble",
         "component": "main",
         "site": "packages.example.invalid"
       }

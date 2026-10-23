@@ -60,7 +60,7 @@ def _fixture_data():
     """Return fresh, public synthetic inputs, never records from the host."""
     inventory = {
         "schema_version": 1, "asset_id": _ASSET, "observed_at": core.now(),
-        "os": "debian", "release": "trixie", "architecture": "amd64",
+        "os": "ubuntu", "release": "noble", "architecture": "amd64",
         "collector": "imported", "complete": True,
         "packages": [
             {"ecosystem": "deb", "name": name, "version": _OLD,
@@ -70,7 +70,7 @@ def _fixture_data():
         ],
     }
     origin = {"origin": "Synthetic", "label": "Synthetic", "archive": "synthetic",
-              "codename": "trixie", "component": "main", "site": "synthetic.invalid"}
+              "codename": "noble", "component": "main", "site": "synthetic.invalid"}
     catalog = [
         {"name": name, "architecture": "amd64", "from_version": _OLD,
          "to_version": _NEW, "source_name": name, "source_version": _NEW,
@@ -81,12 +81,14 @@ def _fixture_data():
         for name in _PACKAGES
     ]
     # These invented advisory identities do not assert a real vulnerability.
-    debian = {
-        name: {f"CVE-2099-{10001 + index}": {
+    ubuntu = {
+        f"{10001 + index}-1": {"id": f"{10001 + index}-1",
+            "cves": [f"CVE-2099-{10001 + index}"],
             "description": "Invented advisory for disposable simulation only.",
-            "releases": {"trixie": {"status": "resolved", "fixed_version": _NEW,
-                                      "urgency": "high"}},
-        }} for index, name in enumerate(_PACKAGES)
+            "releases": {"noble": {
+                "sources": {name: {"version": _NEW}},
+                "allbinaries": {name: {"source": name, "version": _NEW, "pocket": "security"}}}},
+        } for index, name in enumerate(_PACKAGES)
     }
     pwn = {"incidents": [{
         "slug": "synthetic-demo-incident", "title": "Invented demo incident",
@@ -105,7 +107,7 @@ def _fixture_data():
     }
     automatic = copy.deepcopy(policy)
     automatic["mode"] = "auto"
-    return {"inventory": inventory, "catalog": catalog, "debian": debian, "pwn": pwn,
+    return {"inventory": inventory, "catalog": catalog, "ubuntu": ubuntu, "pwn": pwn,
             "manual": policy, "auto": automatic}
 
 
@@ -173,7 +175,7 @@ class _Scenario:
         self.call("init-simulator", "--inventory", str(fixtures["inventory"]),
                   "--catalog", str(fixtures["catalog"]))
         self.duplicate_imports = {}
-        for source in ("debian", "pwn"):
+        for source in ("ubuntu", "pwn"):
             first = self.call("import-feed", source, str(fixtures[source]))
             second = self.call("import-feed", source, str(fixtures[source]))
             for health in (first, second):

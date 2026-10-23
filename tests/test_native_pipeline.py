@@ -1,4 +1,4 @@
-"""Actual DebianApt/Engine integration; every native operation is replaced.
+"""Actual UbuntuApt/Engine integration; every native operation is replaced.
 
 The fake command runner, synthetic native observations, clock, root permission
 check and fixed lock paths are test-only substitutions. No real package command,
@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from autoprotect import backends, engine as engine_module
-from autoprotect.backends import DebianApt
+from autoprotect.backends import UbuntuApt
 from autoprotect.core import AutoprotectError, BackendError, canonical
 from autoprotect.engine import Engine
 from autoprotect.local_files import prepare_database
@@ -35,26 +35,30 @@ class NativePipelineTests(unittest.TestCase):
             patch.object(backends, "_DATABASE_LOCK", database_lock),
             patch.object(backends, "now", side_effect=lambda: self.timestamp),
             patch.object(backends, "collect_local", side_effect=lambda runner: copy.deepcopy(runner.inventory)),
-            patch.object(DebianApt, "_live", autospec=True),
+            patch.object(UbuntuApt, "_live", autospec=True),
         ):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.backend = DebianApt(self.runner, live=True)
-        self.policy = dict(policy("debian-apt"), schema_version=1, max_inventory_age=300,
+        self.backend = UbuntuApt(self.runner, live=True)
+        self.policy = dict(policy("ubuntu-apt"), schema_version=1, max_inventory_age=300,
                            max_feed_age=300, plan_ttl=300, approval_ttl=10)
-        self.raw = canonical({"widget-src": {"CVE-2026-10001": {
-            "description": "Untrusted text: $(never-execute)",
-            "releases": {"trixie": {"status": "resolved", "fixed_version": "1.0-1+deb13u1", "urgency": "high"}},
-        }}}).encode("ascii")
+        self.raw = canonical({"10001-1": {
+            "id": "10001-1", "description": "Untrusted text: $(never-execute)", "cves": ["CVE-2026-10001"],
+            "releases": {"noble": {
+                "sources": {"widget-src": {"version": "1.0-1ubuntu0.24.04.1"}},
+                "allbinaries": {"widget": {"source": "widget-src", "version": "1.0-1ubuntu0.24.04.1",
+                                            "pocket": "security"}},
+            }},
+        }}).encode("ascii")
         self.store = Store(prepare_database(self.root / "database"))
         self.addCleanup(self.store.close)
         self.engine = Engine(self.store, lambda: copy.deepcopy(self.policy), self.backend,
                              clock=lambda: self.timestamp,
                              fetcher=lambda source, etag=None: {"not_modified": False, "raw": self.raw, "etag": '"fixture"'})
-        self.engine.poll("debian")
+        self.engine.poll("ubuntu")
         self.engine.inventory()
         rows = self.engine.triage("synthetic-host")
-        finding = next(row for row in rows if "CVE-2026-10001" in row["advisory_ids"])
+        finding = next(row for row in rows if "USN-10001-1" in row["advisory_ids"])
         self.plan = self.engine.plan(finding["id"])
         self.runner.commands.clear()
         self.runner.events.clear()
@@ -102,7 +106,7 @@ class NativePipelineTests(unittest.TestCase):
         self.assertEqual(result["status"], "needs_attention")
         self.assertFalse(result["result"]["verified"])
         self.assertEqual(self.runner.events.count("install"), 1)
-        with self.assertRaises(BackendError), DebianApt(self.runner, live=True).lock("synthetic-host"):
+        with self.assertRaises(BackendError), UbuntuApt(self.runner, live=True).lock("synthetic-host"):
             self.fail("new backend bypassed retained native gate")
         outcome = self.engine.resolve_recovery(self.plan["id"], "synthetic-operator", "Fixture-only unrelated drift inspected")
         self.assertTrue(outcome["gate_cleared"])
@@ -155,9 +159,48 @@ class NativePipelineTests(unittest.TestCase):
         self.assertNotIn("install", self.runner.events)
         self.assertFalse(self.backend._gate_path.exists())
 
+    def test_old_base_release_blocks_planning_not_collection_configuration_or_triage(self):
+        # Synthetic age beyond even the maximum allowed repository-age policy.
+        # Collection reads installed state, not repository Release freshness.
+        old_date = CLOCK - 31_536_001
+        self.runner.evidence["releases"][0].update(date=old_date, valid_until=None)
+        self.runner.config_report["sources"][0]["release"] = {"date": old_date, "valid_until": None}
+        observed = self.engine.inventory()
+        self.assertEqual(observed["body"], self.backend.inspect())
+        findings = self.engine.triage("synthetic-host")
+        affected = next(row for row in findings if "USN-10001-1" in row["advisory_ids"])
+        self.assertEqual(affected["status"], "affected")
+        self.assertEqual(self.runner.events, [])
+        report = self.backend.configuration_report()
+        self.assertEqual(report["sources"][0]["release"]["date"], old_date)
+        self.assertEqual(self.runner.events, ["config"])
+        for max_age in (self.policy["max_repository_age"], 31_536_000):
+            self.policy["max_repository_age"] = max_age
+            with self.subTest(max_age=max_age), self.assertRaisesRegex(BackendError, "max_repository_age"):
+                self.engine.plan(affected["id"])
+        self.assertNotIn("simulate", self.runner.events)
+        self.assertNotIn("download", self.runner.events)
+        self.assertNotIn("install", self.runner.events)
+
+    def test_fresh_security_target_executes_with_old_base_release_still_configured(self):
+        # The source list still contains noble with an old signed Date, but
+        # only fresh security metadata contributes this exact target version.
+        self.runner.config_report["sources"][0]["release"] = {"date": CLOCK - 31_536_001, "valid_until": None}
+        security = dict(self.runner.target["origins"][0], archive="noble-security")
+        self.runner.target["origins"] = [security]
+        self.runner.evidence["releases"][0].update(origin=copy.deepcopy(security), valid_until=None)
+        self.policy["allowed_origins"].append(copy.deepcopy(security))
+        self.plan = self.engine.plan(self.plan["body"]["finding_id"])
+        self.assertEqual(self.plan["body"]["target"]["origins"], [security])
+        self.approve()
+        result = self.engine.execute(self.plan["id"])
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(result["result"]["verified"])
+        self.assertEqual(self.runner.events.count("install"), 1)
+
     def test_import_after_poll_cannot_retain_native_execution_authority(self):
         self.approve()
-        self.engine.ingest("debian", self.raw)
+        self.engine.ingest("ubuntu", self.raw)
         with self.assertRaises(AutoprotectError):
             self.engine.execute(self.plan["id"])
         self.assertNotIn("download", self.runner.events)

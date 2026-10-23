@@ -13,7 +13,7 @@ SPEC.loader.exec_module(CHECK)
 
 def summary():
     success = {"status": "succeeded", "verified_package_state": True, "manual_approval": True,
-               "repeat_execution": "denied", "duplicate_imports": {"debian": True, "pwn": True},
+               "repeat_execution": "denied", "duplicate_imports": {"ubuntu": True, "pwn": True},
                "export_trusted": False}
     return {
         "schema_version": 1, "kind": "disposable-command-demo", "synthetic": True, "backend": "simulator",
@@ -45,7 +45,7 @@ class PackageSummaryTests(unittest.TestCase):
 
     def test_wrong_outcome_recovery_or_cleanup_is_rejected(self):
         changes = (
-            (("synthetic",), False), (("backend",), "debian-apt"), (("commands_run",), True),
+            (("synthetic",), False), (("backend",), "ubuntu-apt"), (("commands_run",), True),
             (("cleanup", "temporary_state_removed"), False), (("cleanup", "caller_state_used"), True),
             (("scenarios", "manual", "status"), "pending"),
             (("scenarios", "automatic", "manual_approval"), True),

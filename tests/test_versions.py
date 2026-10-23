@@ -1,7 +1,7 @@
 import unittest
 
 from autoprotect.core import ValidationError
-from autoprotect.debian import compare_versions
+from autoprotect.versions import compare_versions
 
 
 # Native dpkg differential verification uses the same cases, plus generated
@@ -23,8 +23,8 @@ PAIRS = [
     ("1.0~rc1-1", "1.0-1", -1),
     ("1.0-1", "1.0-1+b1", -1),
     ("1.0-1+b9", "1.0-1+b10", -1),
-    ("1.0-1+deb13u1", "1.0-1+deb13u2", -1),
-    ("1.0-1~bpo13+1", "1.0-1", -1),
+    ("1.0-1+u1", "1.0-1+u2", -1),
+    ("1.0-1~backport1", "1.0-1", -1),
     ("1a", "1+", -1),
     ("1A", "1a", -1),
     ("1+", "1.", -1),
@@ -38,7 +38,7 @@ PAIRS = [
 ]
 
 
-class DebianVersionTests(unittest.TestCase):
+class DpkgVersionTests(unittest.TestCase):
     def test_known_ordering_and_symmetry(self):
         for left, right, expected in PAIRS:
             with self.subTest(left=left, right=right):

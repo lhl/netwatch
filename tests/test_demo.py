@@ -109,7 +109,7 @@ class _InProcessCLI:
 class DemoFixtureUnitTests(unittest.TestCase):
     def test_fixtures_are_strict_synthetic_inputs(self):
         data = demo._fixture_data()
-        self.assertEqual(set(data), {"inventory", "catalog", "debian", "pwn", "manual", "auto"})
+        self.assertEqual(set(data), {"inventory", "catalog", "ubuntu", "pwn", "manual", "auto"})
         self.assertEqual(normalize_inventory(data["inventory"]), data["inventory"])
         for mode in ("manual", "auto"):
             policy = validate_policy(data[mode])
@@ -119,7 +119,7 @@ class DemoFixtureUnitTests(unittest.TestCase):
             self.assertEqual(policy["allowed_packages"], list(demo._PACKAGES))
             self.assertFalse(policy["allow_maintainer_scripts"])
             self.assertFalse(policy["trusted_installed_lineage"])
-        assertions = feeds.parse_debian(data["debian"])
+        assertions = feeds.parse_ubuntu(data["ubuntu"])
         self.assertEqual(len(assertions), 2)
         self.assertTrue(all(row["fixed_version"] == demo._NEW for row in assertions))
         self.assertTrue(feeds.parse_pwn(data["pwn"])[0]["is_example"])
@@ -291,7 +291,7 @@ class DemoProcessUnitTests(unittest.TestCase):
             self.call()
 
     def test_disallowed_commands_and_live_opt_in_never_spawn(self):
-        for arguments in (("poll", "debian"), ("demo",), ("inventory", "--live"), ("/bin/sh",), ()):
+        for arguments in (("poll", "ubuntu"), ("demo",), ("inventory", "--live"), ("/bin/sh",), ()):
             with self.subTest(arguments=arguments):
                 with self.assertRaises(core.AutoprotectError):
                     self.commands.call(self.state, self.policy, *arguments)
@@ -348,7 +348,7 @@ class DemoOrchestrationUnitTests(unittest.TestCase):
     def test_complete_matrix_with_fake_child_results_and_real_disposable_apis(self):
         with patch("autoprotect.inventory.collect_local", side_effect=AssertionError("No host inventory")), \
              patch("autoprotect.feeds.fetch_source", side_effect=AssertionError("No network")), \
-             patch("autoprotect.backends.DebianApt", side_effect=AssertionError("No native backend")):
+             patch("autoprotect.backends.UbuntuApt", side_effect=AssertionError("No native backend")):
             result, fake = self.run_fake()
         self.assertTrue(result["synthetic"])
         self.assertEqual(result["backend"], "simulator")

@@ -41,7 +41,7 @@ def verify_demo(result):
             row = scenarios[mode]
             require(row["status"] == "succeeded" and row["verified_package_state"] is True)
             require(row["manual_approval"] is (mode == "manual") and row["repeat_execution"] == "denied")
-            require(row["export_trusted"] is False and row["duplicate_imports"] == {"debian": True, "pwn": True})
+            require(row["export_trusted"] is False and row["duplicate_imports"] == {"ubuntu": True, "pwn": True})
         before, after = scenarios["before_write"], scenarios["after_write"]
         require(before["status"] == "failed" and before["verified"] is False)
         require(before["package_state_unchanged"] is True and before["gate_retained"] is False)
@@ -75,7 +75,7 @@ def main():
         run([sys.executable, "-c", build], cwd=snapshot, env=env)
         wheel, = (snapshot / "dist").glob("*.whl")
         sdist, = (snapshot / "dist").glob("*.tar.gz")
-        required = {f"autoprotect/{name}.py" for name in ("__main__", "cli", "demo", "engine", "store", "backends", "_apt_probe")}
+        required = {f"autoprotect/{name}.py" for name in ("__main__", "cli", "demo", "engine", "store", "backends", "_apt_probe", "versions", "feeds", "matching")}
         with zipfile.ZipFile(wheel) as archive:
             if not required <= set(archive.namelist()):
                 raise RuntimeError("Wheel omits required runtime modules")

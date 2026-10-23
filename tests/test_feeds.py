@@ -69,7 +69,7 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(len(feeds.parse_pwn(data)[1]["identifiers"]), 3)
         for source, raw in (
             ("pwn", '{"incidents":[],"incidents":[]}'),
-            ("debian", '{"example-source":{"CVE-2026-10001":{},"CVE-2026-10001":{}}}'),
+            ("ubuntu", '{"10001-1":{},"10001-1":{}}'),
         ):
             with self.subTest(source=source), self.assertRaises(ValidationError):
                 feeds.parse_source(source, raw)
@@ -100,67 +100,156 @@ class ParseTests(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
                 feeds.parse_pwn(data)
 
-    def test_debian_observed_nested_shape_and_release_scope(self):
-        data = fixture("debian")
-        records = feeds.parse_debian(data)
+    def test_ubuntu_observed_usn_shape_and_release_scope(self):
+        data = fixture("ubuntu")
+        original = copy.deepcopy(data)
+        records = feeds.parse_ubuntu(data)
         self.assertEqual(len(records), 7)
-        self.assertEqual({row["release"] for row in records}, {"trixie"})
-        row = next(row for row in records if row["source_name"] == "example-source" and row["id"] == "CVE-2026-10001")
+        self.assertEqual({row["release"] for row in records}, {"noble"})
+        row = next(row for row in records if row["id"] == "USN-10001-1")
         self.assertEqual(row, {
-            "id": "CVE-2026-10001", "source_name": "example-source", "release": "trixie",
-            "status": "resolved", "fixed_version": "1:1.0-1+deb13u2", "urgency": "high",
-            "description": data["example-source"]["CVE-2026-10001"]["description"],
+            "id": "USN-10001-1", "source_name": "example-source", "release": "noble",
+            "status": "resolved", "fixed_version": "1:1.0-1ubuntu0.24.04.2", "urgency": "unknown",
+            "description": data["10001-1"]["description"],
+            "cve_ids": ["CVE-2026-10001"], "pocket": "security", "binary_packages": ["libexample1"],
         })
         self.assertIn("\x1b", row["description"])
-        self.assertNotIn("repositories", row)
-        self.assertEqual(feeds.parse_debian(dict(reversed(list(data.items())))), records)
-        with self.assertRaises(ValidationError):
-            feeds.parse_debian(data, release="stable")
+        for field in ("archs", "urls", "binaries", "trusted", "acquisition", "action"):
+            self.assertNotIn(field, row)
+        self.assertEqual(data, original)
+        self.assertEqual(feeds.parse_ubuntu(dict(reversed(list(data.items())))), records)
+        for release in ("jammy", "stable", "noble-security"):
+            with self.subTest(release=release), self.assertRaises(ValidationError):
+                feeds.parse_ubuntu(data, release=release)
 
-    def test_debian_zero_open_unknown_and_missing_release(self):
-        rows = {row["id"]: row for row in feeds.parse_debian(fixture("debian")) if row["source_name"] == "example-source"}
-        self.assertEqual((rows["CVE-2026-10002"]["status"], rows["CVE-2026-10002"]["fixed_version"]), ("resolved", "0"))
-        self.assertEqual((rows["CVE-2026-10003"]["status"], rows["CVE-2026-10003"]["fixed_version"]), ("open", None))
-        self.assertEqual(rows["CVE-2026-10004"]["status"], "future-state")
-        self.assertEqual(rows["CVE-2026-10005"]["status"], "unknown")
-        self.assertIsNone(rows["CVE-2026-10005"]["fixed_version"])
+    def test_ubuntu_missing_fix_release_and_pocket_remain_unknown(self):
+        rows = {row["id"]: row for row in feeds.parse_ubuntu(fixture("ubuntu"))}
+        for key in ("USN-10003-1", "USN-10004-1", "USN-10005-1", "USN-10006-1"):
+            with self.subTest(key=key):
+                self.assertEqual(rows[key]["status"], "unknown")
+        self.assertIsNone(rows["USN-10003-1"]["fixed_version"])
+        self.assertIsNone(rows["USN-10005-1"]["fixed_version"])
+        self.assertIsNone(rows["USN-10005-1"]["pocket"])
+        self.assertEqual(rows["USN-10004-1"]["pocket"], "esm-apps")
+        # There is no special not-affected version marker in the USN format.
+        self.assertEqual(rows["USN-10002-1"]["fixed_version"], "1:0.9-1ubuntu0.24.04.1")
 
-    def test_debian_temporary_ids_are_retained_only_as_unknown(self):
-        row = next(row for row in feeds.parse_debian(fixture("debian")) if row["id"].startswith("TEMP-"))
-        self.assertEqual(row["id"], "TEMP-0000000-ABCDEF")
-        self.assertEqual(row["status"], "unknown")
-        self.assertEqual(row["fixed_version"], "0")
-        for advisory_id in ("TEMP-0-ABCDEF", "TEMP-0000000-GHIJKL", "TEMP-0000000-ABCDEF\n"):
-            with self.subTest(advisory_id=advisory_id), self.assertRaises(ValidationError):
-                feeds.parse_debian({"example-source": {advisory_id: {}}})
-
-    def test_debian_incomplete_conflicting_and_unsupported_assertions_are_unknown(self):
-        for release in ({}, {"status": "resolved"}, {"status": "resolved", "fixed_version": ""},
-                        {"status": "open", "fixed_version": "0"},
-                        {"status": "open", "fixed_version": "1.0-1"},
-                        {"status": "resolved", "fixed_version": "<end-of-life>"},
-                        {"status": "resolved", "fixed_version": "1;run"}):
-            data = {"example-source": {"CVE-2026-10001": {"releases": {"trixie": release}}}}
-            row = feeds.parse_debian(data)[0]
-            with self.subTest(release=release):
+    def test_ubuntu_pro_esm_and_special_pockets_never_become_resolved(self):
+        for pocket in ("esm-apps", "esm-infra", "pro", "fips-updates", "realtime", "updates", "future-pocket", ""):
+            data = fixture("ubuntu")
+            data["10001-1"]["releases"]["noble"]["allbinaries"]["libexample1"]["pocket"] = pocket
+            with self.subTest(pocket=pocket):
+                row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
                 self.assertEqual(row["status"], "unknown")
-                self.assertEqual(row["fixed_version"], release.get("fixed_version") or None)
+        for fixed in ("1.0+esm1", "1.0+ESM1", "0", "", "1;run", "2147483648:1"):
+            data = fixture("ubuntu")
+            data["10001-1"]["releases"]["noble"]["sources"]["example-source"]["version"] = fixed
+            with self.subTest(fixed=fixed):
+                row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+                self.assertEqual(row["status"], "unknown")
 
-    def test_debian_malformed_identity_or_structure_rejects_all(self):
-        for data in ([], {"../pkg": {}}, {"example-source": []},
-                     {"example-source": {"GHSA-2345-6789-cfgh": {}}},
-                     {"example-source": {"CVE-2026-10001": []}},
-                     {"example-source": {"CVE-2026-10001": {"releases": []}}},
-                     {"example-source": {"CVE-2026-10001": {"releases": {"trixie": None}}}}):
+    def test_ubuntu_mixed_or_missing_binary_evidence_is_unknown(self):
+        for change in ({}, {"libother": {"source": "example-source", "version": "1.0", "pocket": "esm-apps"}},
+                       {"libother": {"source": "example-source", "version": "1.0"}}):
+            data = fixture("ubuntu")
+            entry = data["10001-1"]["releases"]["noble"]
+            if change:
+                entry["allbinaries"].update(change)
+            else:
+                del entry["allbinaries"]["libexample1"]["pocket"]
+            row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+            self.assertEqual(row["status"], "unknown")
+
+    def test_ubuntu_prefixed_ids_reference_urls_and_large_notice_lists(self):
+        data = fixture("ubuntu")
+        notice = data["10001-1"]
+        notice["id"] = "USN-10001-1"
+        notice["cves"] = [f"CVE-2026-{20000 + index}" for index in range(1000)]
+        notice["cves"] += ["https://launchpad.net/bugs/999999999", "http://evil.invalid/do-not-fetch"]
+        row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+        self.assertEqual(len(row["cve_ids"]), 1000)
+        self.assertEqual(row["status"], "resolved")
+        self.assertNotIn("evil.invalid", str(row))
+        notice["cves"] = ["CVE-2026-10001"] * 4097
+        with self.assertRaises(ValidationError):
+            feeds.parse_ubuntu(data)
+        for value in ("file:///etc/passwd", "https://evil.invalid/\n", "CVE-2026-nope"):
+            notice["cves"] = [value]
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                feeds.parse_ubuntu(data)
+
+    def test_ubuntu_hidden_notice_never_supplies_actionable_evidence(self):
+        data = fixture("ubuntu")
+        data["10001-1"]["is_hidden"] = True
+        row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+        self.assertEqual(row["status"], "unknown")
+        data["10001-1"]["is_hidden"] = "true"
+        row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+        self.assertEqual(row["status"], "unknown")
+        data["10001-1"]["is_hidden"] = "false"
+        row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+        self.assertEqual(row["status"], "resolved")
+        for invalid in (0, 1, "False", "no", None):
+            data["10001-1"]["is_hidden"] = invalid
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                feeds.parse_ubuntu(data)
+
+    def test_ubuntu_embedded_authority_and_status_claims_are_ignored(self):
+        data = fixture("ubuntu")
+        expected = feeds.parse_ubuntu(data)
+        notice = data["10001-1"]
+        notice.update(trusted=True, acquisition="https", url="https://evil.invalid/payload",
+                      status="not-affected", fixed_version="0")
+        notice["releases"]["noble"]["sources"]["example-source"].update(
+            trusted=True, status="resolved", fixed_version="999.0")
+        self.assertEqual(feeds.parse_ubuntu(data), expected)
+
+    def test_ubuntu_binary_version_and_identity_evidence_cannot_be_spoofed(self):
+        for value in (None, "", "0", "1.0+esm1", "1.0+ESM1", "1;run", "2147483648:1"):
+            data = fixture("ubuntu")
+            entry = data["10001-1"]["releases"]["noble"]
+            entry["allbinaries"]["libexample1"]["version"] = value
+            with self.subTest(value=value):
+                row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+                self.assertEqual(row["status"], "unknown")
+        data = fixture("ubuntu")
+        del data["10001-1"]["releases"]["noble"]["allbinaries"]["libexample1"]["source"]
+        row = next(row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1")
+        self.assertEqual(row["status"], "unknown")
+        self.assertEqual(row["binary_packages"], [])
+
+    def test_ubuntu_aliases_remain_notice_scoped_not_source_cve_cross_products(self):
+        data = fixture("ubuntu")
+        notice = data["10001-1"]
+        notice["cves"] = ["CVE-2026-10001", "CVE-2026-10001", "CVE-2026-10002"]
+        notice["releases"]["noble"]["sources"]["another-source"] = {"version": "1.0"}
+        rows = [row for row in feeds.parse_ubuntu(data) if row["id"] == "USN-10001-1"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(all(row["cve_ids"] == ["CVE-2026-10001", "CVE-2026-10002"] for row in rows))
+        self.assertTrue(all(row["id"] == "USN-10001-1" for row in rows))
+
+    def test_ubuntu_malformed_identity_or_structure_rejects_all(self):
+        for data in ([], {"../pkg": {}}, {"10001-1": []}, {"10001-1": {"id": "10002-1"}},
+                     {"10001-1": {"id": "10001-1", "releases": []}},
+                     {"10001-1": {"id": "10001-1", "releases": {"noble": None}}}):
             with self.subTest(data=data), self.assertRaises(ValidationError):
-                feeds.parse_debian(data)
-        for key, value in (("status", False), ("fixed_version", 0), ("urgency", [])):
-            data = {"example-source": {"CVE-2026-10001": {"releases": {"trixie": {key: value}}}}}
-            with self.subTest(key=key), self.assertRaises(ValidationError):
-                feeds.parse_debian(data)
+                feeds.parse_ubuntu(data)
+        for field, value in (("sources", []), ("sources", {"../pkg": {}}),
+                             ("sources", {"example-source": {"version": 0}}),
+                             ("allbinaries", []), ("allbinaries", {"libexample1": None}),
+                             ("allbinaries", {"libexample1": {"source": "../pkg"}})):
+            data = fixture("ubuntu")
+            data["10001-1"]["releases"]["noble"][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValidationError):
+                feeds.parse_ubuntu(data)
+        for cves in (None, "CVE-2026-10001", ["CVE-2026-1"], ["CVE-2026-10001\n"], ["$(id)"]):
+            data = fixture("ubuntu")
+            data["10001-1"]["cves"] = cves
+            with self.subTest(cves=cves), self.assertRaises(ValidationError):
+                feeds.parse_ubuntu(data)
 
     def test_parse_source_dispatch_and_bounded_raw_input(self):
-        for source in ("pwn", "debian"):
+        for source in ("pwn", "ubuntu"):
             raw = (FIXTURES / f"{source}.json").read_bytes()
             expected = getattr(feeds, f"parse_{source}")(json.loads(raw))
             self.assertEqual(feeds.parse_source(source, raw), expected)
@@ -188,8 +277,16 @@ class ParseTests(unittest.TestCase):
             feeds.parse_pwn(fixture("pwn"))
         with patch.object(feeds, "_MAX_PWN_RECORDS", 1), self.assertRaises(ValidationError):
             feeds.parse_pwn(fixture("pwn"))
-        with patch.object(feeds, "_MAX_DEBIAN_RECORDS", 1), self.assertRaises(ValidationError):
-            feeds.parse_debian(fixture("debian"))
+        with patch.object(feeds, "_MAX_UBUNTU_RECORDS", 1), self.assertRaises(ValidationError):
+            feeds.parse_ubuntu(fixture("ubuntu"))
+        with patch.object(feeds, "_MAX_UBUNTU_NODES", 4), self.assertRaises(ValidationError):
+            feeds.parse_ubuntu(fixture("ubuntu"))
+        with patch.object(feeds, "_MAX_NOTICES", 1), self.assertRaises(ValidationError):
+            feeds.parse_ubuntu(fixture("ubuntu"))
+        with patch.object(feeds, "_MAX_BINARIES", 0), self.assertRaises(ValidationError):
+            feeds.parse_ubuntu(fixture("ubuntu"))
+        with patch.dict(feeds._BYTE_LIMITS, ubuntu=16), self.assertRaises(ValidationError):
+            feeds.parse_source("ubuntu", (FIXTURES / "ubuntu.json").read_bytes())
         data = fixture("pwn")
         data["incidents"][0]["fixedVersions"] = ["x"] * 257
         with self.assertRaises(ValidationError):
@@ -367,10 +464,10 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(connection.response.closed)
         self.assertEqual(len(factory.connections), 1)
 
-    def test_debian_endpoint_is_fixed(self):
-        _, _, connection = self.direct(source="debian")
-        self.assertEqual(connection.host, "security-tracker.debian.org")
-        self.assertEqual(connection.requests[0][1], "/tracker/data/json")
+    def test_ubuntu_endpoint_is_fixed(self):
+        _, _, connection = self.direct(source="ubuntu")
+        self.assertEqual(connection.host, "usn.ubuntu.com")
+        self.assertEqual(connection.requests[0][1], "/usn-db/database.json")
 
     def test_304_requires_validator_and_never_reads_body(self):
         factory = FakeConnectionFactory(status=304, headers=[], body=b"must not read")

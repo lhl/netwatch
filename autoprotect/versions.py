@@ -1,4 +1,4 @@
-"""Debian epoch/upstream/revision ordering, independent of the host platform."""
+"""dpkg epoch/upstream/revision ordering, independent of the host platform."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def _revision_compare(left: str, right: str) -> int:
 
 
 def compare_versions(left: str, right: str) -> int:
-    """Return -1, 0 or 1 using Debian semantics, rejecting unsupported syntax."""
+    """Return -1, 0 or 1 using dpkg semantics, rejecting unsupported syntax."""
     left_epoch, left_upstream, left_revision = _parts(left)
     right_epoch, right_upstream, right_revision = _parts(right)
     if left_epoch != right_epoch:

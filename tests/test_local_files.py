@@ -31,7 +31,8 @@ class LocalFileTests(unittest.TestCase):
 
     def test_limit_argument_is_strict(self):
         path = self.file()
-        for cap in (0, -1, True, 1.5, 128 * 1024 * 1024 + 1):
+        self.assertEqual(read_bytes(path, max_bytes=512 * 1024 * 1024), b"{}")
+        for cap in (0, -1, True, 1.5, 512 * 1024 * 1024 + 1):
             with self.subTest(cap=cap), self.assertRaises(ValidationError):
                 read_bytes(path, max_bytes=cap)
 

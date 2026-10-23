@@ -25,14 +25,18 @@ from .core import AutoprotectError, ValidationError, identifier, load_json, pack
 
 _ENDPOINTS = {
     "pwn": ("pwn.watch", "/incidents.json"),
-    "debian": ("security-tracker.debian.org", "/tracker/data/json"),
+    "ubuntu": ("usn.ubuntu.com", "/usn-db/database.json"),
 }
-_BYTE_LIMITS = {"pwn": 8 * 1024 * 1024, "debian": 128 * 1024 * 1024}
+_BYTE_LIMITS = {"pwn": 8 * 1024 * 1024, "ubuntu": 512 * 1024 * 1024}
 _MAX_NODES = 8_000_000
+_MAX_UBUNTU_NODES = 32_000_000
 _MAX_DEPTH = 32
 _MAX_TEXT = 65536
 _MAX_PWN_RECORDS = 10_000
-_MAX_DEBIAN_RECORDS = 500_000
+_MAX_UBUNTU_RECORDS = 500_000
+_MAX_NOTICES = 50_000
+_MAX_BINARIES = 10_000
+_MAX_USN_REFERENCES = 4096
 _MAX_LIST = 256
 _SOCKET_TIMEOUT = 10
 _TOTAL_TIMEOUT = 60
@@ -53,7 +57,7 @@ _FORBIDDEN_TRAILERS = frozenset({
 })
 _CONNECTION_FACTORY = http.client.HTTPSConnection
 _CVE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}", re.ASCII)
-_DEBIAN_TEMP = re.compile(r"TEMP-[0-9]{7,}-[0-9A-F]{6}", re.ASCII)
+_USN = re.compile(r"[0-9]+-[0-9]+", re.ASCII)
 _GHSA = re.compile(r"GHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}", re.ASCII)
 _MAL = re.compile(r"MAL-[0-9]{4}-[0-9]+", re.ASCII)
 _ETAG = re.compile(r'(?:W/)?"[\x21\x23-\x7e]*"', re.ASCII)
@@ -61,7 +65,7 @@ _ETAG = re.compile(r'(?:W/)?"[\x21\x23-\x7e]*"', re.ASCII)
 
 def _source(source):
     if not isinstance(source, str) or source not in _ENDPOINTS:
-        raise ValidationError("Source must be pwn or debian; custom endpoints are not supported")
+        raise ValidationError("Source must be pwn or ubuntu; custom endpoints are not supported")
     return source
 
 
@@ -88,7 +92,8 @@ def _check_structure(data, source):
             continue
         nodes += 1
         size += 2
-        if nodes > _MAX_NODES or len(stack) - 1 > _MAX_DEPTH:
+        node_limit = _MAX_UBUNTU_NODES if source == "ubuntu" else _MAX_NODES
+        if nodes > node_limit or len(stack) - 1 > _MAX_DEPTH:
             raise ValidationError("Feed exceeds the nesting or node limit")
         if isinstance(item, str):
             size += len(text(item, "feed text", max_length=_MAX_TEXT, allow_empty=True).encode("utf-8"))
@@ -117,9 +122,9 @@ def _check_structure(data, source):
             raise ValidationError("Decoded feed exceeds the byte budget")
 
 
-def _strings(value, field, *, max_length=8192):
-    if not isinstance(value, list) or len(value) > _MAX_LIST:
-        raise ValidationError(f"{field} must be a list of at most {_MAX_LIST} strings")
+def _strings(value, field, *, max_length=8192, max_items=_MAX_LIST):
+    if not isinstance(value, list) or len(value) > max_items:
+        raise ValidationError(f"{field} must be a list of at most {max_items} strings")
     return [text(item, field, max_length=max_length) for item in value]
 
 
@@ -172,58 +177,127 @@ def parse_pwn(data):
     return sorted(result, key=lambda row: row["id"])
 
 
-def parse_debian(data, release="trixie"):
-    """Normalize source-package -> advisory -> releases, scoped to trixie.
+def parse_ubuntu(data, release="noble"):
+    """Normalize Canonical's USN database, not a generic vulnerability tracker.
 
-    Absent release evidence produces an unknown assertion, not a safe verdict.
-    Invalid/ambiguous version semantics remain visible with status=unknown.
-    Debian TEMP identifiers are retained as unknown, never invented CVEs.
-    Ordinary fixed versions are comparison boundaries, never install targets.
+    The raw shape is notice ID -> releases -> sources/allbinaries. A USN lists
+    CVEs at notice level; do not invent a source-package/CVE cross product.
+    Missing release/source/pocket/fix evidence stays unknown. Only standard
+    security-pocket fixes are assessable; Pro/ESM and special pockets are not.
+    Feed artifact URLs and action prose are never installation instructions.
     """
-    if release != "trixie":
-        raise ValidationError("Only the trixie Debian release is supported")
-    _check_structure(data, "debian")
+    if release != "noble":
+        raise ValidationError("Only Ubuntu 24.04 LTS noble is supported")
+    _check_structure(data, "ubuntu")
+    notices = _object(data, "Ubuntu USN database")
+    if len(notices) > _MAX_NOTICES:
+        raise ValidationError("Ubuntu feed exceeds the notice limit")
     result = []
-    for source, advisories in _object(data, "Debian feed").items():
-        source = package_name(source, "Debian source package")
-        for advisory_id, advisory in _object(advisories, "Debian advisories").items():
-            if len(result) >= _MAX_DEBIAN_RECORDS:
-                raise ValidationError("Debian feed exceeds the advisory record limit")
-            advisory_id = identifier(advisory_id, "Debian advisory ID")
-            temporary = bool(_DEBIAN_TEMP.fullmatch(advisory_id))
-            if not temporary and not _CVE.fullmatch(advisory_id):
-                raise ValidationError("Debian advisory ID must be a CVE or TEMP identifier")
-            advisory = _object(advisory, "Debian advisory")
-            releases = _object(advisory.get("releases", {}), "Debian releases")
-            entry = _object(releases.get(release, {}), "Debian release assertion")
-            status = text(entry.get("status", "unknown"), "Debian status", max_length=128)
-            fixed = entry.get("fixed_version")
+    for notice_id, notice in notices.items():
+        notice_id = identifier(notice_id, "Ubuntu notice ID")
+        if not _USN.fullmatch(notice_id):
+            raise ValidationError("Ubuntu database keys must be numeric USN identities")
+        notice = _object(notice, "Ubuntu notice")
+        if notice.get("id") not in (notice_id, "USN-" + notice_id):
+            raise ValidationError("Ubuntu notice ID does not match its database key")
+        hidden = notice.get("is_hidden", False)
+        if type(hidden) is not bool:
+            if hidden not in ("true", "false"):
+                raise ValidationError("Ubuntu notice is_hidden must be a boolean or literal true/false string")
+            hidden = hidden == "true"
+        references = _strings(notice.get("cves", []), "Ubuntu notice references", max_length=2048,
+                              max_items=_MAX_USN_REFERENCES)
+        # The publisher's cves list also contains bug/notice URLs. They are not
+        # CVE identities, and neither their content nor their location is trusted.
+        cves = []
+        for reference in references:
+            if _CVE.fullmatch(reference):
+                cves.append(identifier(reference, "Ubuntu CVE"))
+            elif not re.fullmatch(r"https?://[^\s\x00-\x20\x7f]+", reference, re.ASCII):
+                raise ValidationError("Ubuntu notice reference must be a CVE or an HTTP(S) URL")
+        cves = sorted(set(cves))
+        description = text(notice.get("description", ""), "Ubuntu description", max_length=_MAX_TEXT, allow_empty=True)
+        releases = _object(notice.get("releases", {}), "Ubuntu releases")
+        # Preserve source-level unknown coverage for notices lacking Noble data.
+        # A source mentioned only for another release never inherits that fix.
+        source_names = set()
+        for release_entry in releases.values():
+            release_entry = _object(release_entry, "Ubuntu release")
+            for name, entry in _object(release_entry.get("sources", {}), "Ubuntu source packages").items():
+                source_names.add(package_name(name, "Ubuntu source package"))
+                _object(entry, "Ubuntu source entry")
+        entry = _object(releases.get(release, {}), "Ubuntu Noble release")
+        sources = _object(entry.get("sources", {}), "Ubuntu Noble sources")
+        binaries = _object(entry.get("allbinaries", {}), "Ubuntu binary packages")
+        if len(binaries) > _MAX_BINARIES:
+            raise ValidationError("Ubuntu notice exceeds the binary-package limit")
+        binary_index = {}
+        for name, binary in binaries.items():
+            name = package_name(name, "Ubuntu binary package")
+            binary = _object(binary, "Ubuntu binary entry")
+            source = binary.get("source")
+            if source is None:
+                continue  # Missing lineage cannot establish a source/binary link.
+            source = package_name(source, "Ubuntu binary source")
+            source_names.add(source)
+            pocket = binary.get("pocket")
+            if pocket is not None:
+                pocket = text(pocket, "Ubuntu pocket", max_length=128, allow_empty=True)
+            binary_version = binary.get("version")
+            valid_version = False
+            if binary_version is not None:
+                binary_version = text(binary_version, "Ubuntu binary fixed version", max_length=256, allow_empty=True)
+                try:
+                    version(binary_version)
+                    valid_version = binary_version != "0" and "esm" not in binary_version.lower()
+                except ValidationError:
+                    pass
+            binary_index.setdefault(source, []).append((name, pocket, valid_version))
+        for source in sorted(source_names):
+            if len(result) >= _MAX_UBUNTU_RECORDS:
+                raise ValidationError("Ubuntu feed exceeds the assertion limit")
+            source_entry = _object(sources.get(source, {}), "Ubuntu source assertion")
+            fixed = source_entry.get("version")
             if fixed is not None:
-                fixed = text(fixed, "Debian fixed version", max_length=256, allow_empty=True) or None
-            if fixed is not None:
+                fixed = text(fixed, "Ubuntu source fixed version", max_length=256, allow_empty=True) or None
+            linked = binary_index.get(source, [])
+            pockets = {pocket for _, pocket, _ in linked}
+            pocket = next(iter(pockets)) if len(pockets) == 1 else None
+            status = "unknown"
+            if (not hidden and fixed and fixed != "0" and "esm" not in fixed.lower() and pocket == "security"
+                    and all(valid for _, _, valid in linked)):
                 try:
                     version(fixed)
+                    status = "resolved"
                 except ValidationError:
-                    status = "unknown"
-            if temporary or (status == "resolved" and fixed is None) or (status == "open" and fixed is not None):
-                status = "unknown"
+                    pass
             result.append({
-                "id": advisory_id,
+                "id": "USN-" + notice_id,
                 "source_name": source,
                 "release": release,
                 "status": status,
                 "fixed_version": fixed,
-                "urgency": text(entry.get("urgency", "unknown"), "Debian urgency", max_length=128),
-                "description": text(advisory.get("description", ""), "Debian description", max_length=_MAX_TEXT, allow_empty=True),
+                "urgency": "unknown",  # This database does not supply severity.
+                "description": description,
+                "cve_ids": cves,
+                "pocket": pocket,
+                "binary_packages": sorted(name for name, _, _ in linked),
             })
     return sorted(result, key=lambda row: (row["source_name"], row["id"]))
 
 
+def decode_source(source, raw):
+    """Decode a complete source using its shared byte, node and depth limits."""
+    source = _source(source)
+    return load_json(raw, max_bytes=_BYTE_LIMITS[source],
+                     max_nodes=_MAX_UBUNTU_NODES if source == "ubuntu" else _MAX_NODES,
+                     max_depth=_MAX_DEPTH)
+
+
 def parse_source(source, raw):
     """Load an entire bounded snapshot; reject it rather than return partial data."""
-    source = _source(source)
-    data = load_json(raw, max_bytes=_BYTE_LIMITS[source], max_nodes=_MAX_NODES, max_depth=_MAX_DEPTH)
-    return parse_pwn(data) if source == "pwn" else parse_debian(data)
+    data = decode_source(source, raw)
+    return parse_pwn(data) if source == "pwn" else parse_ubuntu(data)
 
 
 def _validate_etag(etag):

@@ -2,6 +2,8 @@
 
 This checklist tracks the original assignment: research security feeds and patch information, design the system, build a working proof of concept, and independently review it. Checking a box requires implementation or research evidence, not a plan.
 
+Sections before **Ubuntu LTS retargeting** record the completed baseline and its historical checks. Their test counts and review outcomes do not qualify the Ubuntu migration; current acceptance is tracked separately below.
+
 ## Baseline
 
 - [x] Inspect the repository and inherited instructions. The repository had no application files, no commits, and no applicable `AGENTS.md` on inspection. Preserve the existing `.pi/` task state.
@@ -59,12 +61,27 @@ This checklist tracks the original assignment: research security feeds and patch
 
 ## Post-delivery review remediation (2026-10-23)
 
-- [x] Critically review the delivered candidate against real feed data and a stock Debian 13 layout; record findings. See [REVIEW.md](REVIEW.md#post-delivery-critical-review-2026-10-23).
-- [x] Bound triage output and verification cost for real Debian data; prune unreferenced evidence; keep inspection usable during execution (`bc6eb4e`).
-- [x] Support stock Debian 13 configuration and package states; provide a read-only configuration review observation (`27ed6ee`). Real APT/install qualification remains untested.
+- [x] Critically review the earlier native-backend candidate and record findings in the immutable worklog. These historical observations do not qualify Ubuntu execution.
+- [x] Bound triage output and verification cost; prune unreferenced evidence; keep inspection usable during execution (`bc6eb4e`).
+- [x] Support reviewed package configuration and package states; provide a read-only configuration review observation (`27ed6ee`). Ubuntu APT/install qualification remains untested.
 - [x] Refuse root execution of code other users can modify (`2905d87`, extended by the review follow-up).
 - [x] Tighten gate lifecycle edges and runner descendant handling (`ca43e85`, corrected by the review follow-up).
 - [x] Independently review the remediation, then resolve or reject each finding with evidence. 485 tests pass on Python 3.12 and 3.14; the package check passes.
+
+## Ubuntu LTS retargeting
+
+The supported target is Ubuntu 24.04 LTS (`noble`) on `amd64`. Canonical release-specific evidence determines applicability; approved Ubuntu APT repositories determine installable artifacts. Ubuntu Pro/ESM repositories are outside automatic remediation scope. An unsupported release, repository, or missing advisory remains unknown or blocked, not safe.
+
+Acceptance for this change:
+
+- [x] Verify the Canonical feed contract and document source identity, release/source-package matching, missing evidence, and Pro/ESM limitations. See `docs/research/UBUNTU.md`: Canonical USN JSON is notice-based missing-update evidence, not a complete CVE database.
+- [x] Replace the advisory adapter and matching semantics; cover valid, malformed, wrong-release, and unsupported-pocket evidence with offline tests.
+- [x] Retarget native inventory, APT origins/suites/keyrings, release freshness, policy and backend identifiers to Ubuntu; preserve execution safeguards and test both success and denial paths.
+- [x] Update active source files, scripts, filenames, fixtures, examples, CLI commands, README and every active document. Preserve immutable worklog entries and Git history. Retain only the existing debconf noninteractive protocol variable and its test as the closeout exception; no compatibility aliases or alternative distribution support remain.
+- [x] Reject incompatible persisted state without discarding history or reusing previous approvals. Schema 4 rejects prior schemas before writes; fresh state is required.
+- [x] Run the full deterministic suite, module demo, packaging/installed-console checks, worklog checks and whitespace checks. **507 tests passed in 25.515 seconds**; both 101-command demos, both simulator walkthroughs and 1,028 disposable Ubuntu dpkg comparisons passed. Real CLI polling and refresh also succeeded. Active-content audit found only the runner's required debconf protocol variable and its test; the naming exception is retained on user-directed closeout.
+- [x] Obtain independent integrated review, resolve findings, and record exact verification evidence and untested native boundaries. R1 (engine intake limits) was repaired with a shared decoder and regression tests; independent re-review closed it with no new findings. See `docs/REVIEW.md`.
+- [x] Commit the validated change and its worklog entry. No push, release, deployment or live package modification is authorized.
 
 ## Context for implementation
 

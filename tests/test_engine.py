@@ -23,8 +23,8 @@ from autoprotect.inventory import normalize_inventory
 from autoprotect.store import Store
 
 
-ORIGIN = {"origin": "Debian", "label": "Debian-Security", "archive": "stable-security", "codename": "trixie-security",
-          "component": "main", "site": "security.debian.org"}
+ORIGIN = {"origin": "Ubuntu", "label": "Ubuntu", "archive": "noble-security", "codename": "noble",
+          "component": "main", "site": "security.ubuntu.com"}
 
 
 def policy(mode="manual", backend="simulator"):
@@ -38,7 +38,7 @@ def policy(mode="manual", backend="simulator"):
 
 
 def inventory(at=1000):
-    return {"schema_version": 1, "asset_id": "fixture-host", "observed_at": at, "os": "debian", "release": "trixie",
+    return {"schema_version": 1, "asset_id": "fixture-host", "observed_at": at, "os": "ubuntu", "release": "noble",
             "architecture": "amd64", "complete": True, "collector": "simulator", "packages": [
                 {"ecosystem": "deb", "name": "libexample1", "version": "1:1.0-1+b1", "source_name": "example-source",
                  "source_version": "1:1.0-1", "architecture": "amd64", "status": "installed", "held": False},
@@ -48,14 +48,17 @@ def inventory(at=1000):
 
 
 def target():
-    return {"name": "libexample1", "architecture": "amd64", "from_version": "1:1.0-1+b1", "to_version": "1:1.0-1+deb13u1+b1",
-            "source_name": "example-source", "source_version": "1:1.0-1+deb13u1", "sha256": "a" * 64, "size": 100,
+    return {"name": "libexample1", "architecture": "amd64", "from_version": "1:1.0-1+b1", "to_version": "1:1.0-1+ubuntu0.24.04.1+b1",
+            "source_name": "example-source", "source_version": "1:1.0-1+ubuntu0.24.04.1", "sha256": "a" * 64, "size": 100,
             "origins": [ORIGIN], "config_digest": "c" * 64, "metadata_digest": "d" * 64}
 
 
 def source(description="Synthetic advisory"):
-    return canonical({"example-source": {"CVE-2026-10001": {"description": description, "releases": {
-        "trixie": {"status": "resolved", "fixed_version": "1:1.0-1+deb13u1", "urgency": "high"}}}}})
+    return canonical({"10001-1": {"id": "10001-1", "description": description,
+        "cves": ["CVE-2026-10001"], "releases": {"noble": {
+            "sources": {"example-source": {"version": "1:1.0-1+ubuntu0.24.04.1"}},
+            "allbinaries": {"libexample1": {"source": "example-source",
+                "version": "1:1.0-1+ubuntu0.24.04.1", "pocket": "security"}}}}}})
 
 
 class SyntheticBackend:
@@ -89,7 +92,7 @@ class SyntheticBackend:
             raise BackendError("Synthetic observation unavailable")
         data = load_json(self.path.read_bytes())
         data["observed_at"] = self.clock()
-        return normalize_inventory(data, collector="native" if self.name == "debian-apt" else "simulator")
+        return normalize_inventory(data, collector="native" if self.name == "ubuntu-apt" else "simulator")
 
     def generation(self):
         value = self.generation_path.read_text(encoding="ascii") if self.generation_path.exists() else "0" * 64
@@ -224,7 +227,7 @@ class SyntheticBackend:
 class PolicyTests(unittest.TestCase):
     def test_valid_manual_auto_observe_native_and_detached_values(self):
         for mode in ("manual", "auto", "observe"):
-            for backend in ("simulator", "debian-apt"):
+            for backend in ("simulator", "ubuntu-apt"):
                 value = policy(mode, backend)
                 validated = validate_policy(value)
                 validated["allowed_assets"].append("other")
@@ -257,11 +260,16 @@ class PolicyTests(unittest.TestCase):
     def test_native_origins_and_configuration_are_exact(self):
         for change in ({"allowed_origins": []}, {"approved_config_digest": None},
                        {"allowed_origins": [{**ORIGIN, "codename": "stable"}]},
+                       {"allowed_origins": [{**ORIGIN, "codename": "noble-security"}]},
+                       {"allowed_origins": [{**ORIGIN, "origin": "ThirdParty"}]},
+                       {"allowed_origins": [{**ORIGIN, "label": "UbuntuESM"}]},
+                       {"allowed_origins": [{**ORIGIN, "archive": "noble-apps-security"}]},
+                       {"allowed_origins": [{**ORIGIN, "archive": "noble-backports"}]},
                        {"allowed_origins": [{**ORIGIN, "trusted": True}]},
                        {"allowed_origins": [{**ORIGIN, "site": "good\nInjected"}]},
                        {"allowed_origins": [ORIGIN, ORIGIN]}):
             with self.subTest(change=change), self.assertRaises(ValidationError):
-                validate_policy({**policy(backend="debian-apt"), **change})
+                validate_policy({**policy(backend="ubuntu-apt"), **change})
 
 
 class EngineTests(unittest.TestCase):
@@ -288,8 +296,40 @@ class EngineTests(unittest.TestCase):
             raise self.response
         return copy.deepcopy(self.response)
 
+    def test_source_decoding_uses_shared_source_specific_limits(self):
+        from autoprotect import core, feeds
+        for name, raw, byte_limit, nodes in (
+                ("ubuntu", source(), 512 * 1024 * 1024, 32_000_000),
+                ("pwn", canonical({"incidents": []}), 8 * 1024 * 1024, 8_000_000)):
+            for operation in ("import", "poll"):
+                with self.subTest(source=name, operation=operation), \
+                        patch("autoprotect.feeds.load_json", wraps=core.load_json) as decode:
+                    self.response = {"not_modified": False, "raw": raw, "etag": None}
+                    result = self.engine.ingest(name, raw) if operation == "import" else self.engine.poll(name)
+                    self.assertIsNone(result["error"])
+                    decode.assert_called_once_with(raw, max_bytes=byte_limit, max_nodes=nodes, max_depth=32)
+
+    def test_scaled_source_limits_fail_closed_for_import_and_poll(self):
+        for limit in ("bytes", "nodes"):
+            for operation in ("import", "poll"):
+                with self.subTest(limit=limit, operation=operation):
+                    self.engine.ingest("ubuntu", source())
+                    before = self.store.source_health("ubuntu")["snapshot_id"]
+                    self.response = {"not_modified": False, "raw": source("changed"), "etag": None}
+                    boundary = (patch.dict("autoprotect.feeds._BYTE_LIMITS", {"ubuntu": 10})
+                                if limit == "bytes" else patch("autoprotect.feeds._MAX_UBUNTU_NODES", 2))
+                    with boundary:
+                        if operation == "import":
+                            with self.assertRaises(ValidationError):
+                                self.engine.ingest("ubuntu", source("changed"))
+                        else:
+                            self.assertIsNotNone(self.engine.poll("ubuntu")["error"])
+                    health = self.store.source_health("ubuntu")
+                    self.assertEqual(health["snapshot_id"], before)
+                    self.assertIsNotNone(health["error"])
+
     def prepare(self, *, approve=True, poll=False):
-        self.engine.poll("debian") if poll else self.engine.ingest("debian", source())
+        self.engine.poll("ubuntu") if poll else self.engine.ingest("ubuntu", source())
         self.engine.inventory()
         finding = next(row for row in self.engine.triage("fixture-host") if row["status"] == "affected")
         plan = self.engine.plan(finding["id"])
@@ -355,9 +395,9 @@ class EngineTests(unittest.TestCase):
         plan = self.prepare()
         planned_source = plan["body"]["source_digest"]
         self.at += 1
-        self.engine.ingest("debian", source("Second snapshot"))
+        self.engine.ingest("ubuntu", source("Second snapshot"))
         self.at += 1
-        third = self.engine.ingest("debian", source("Third snapshot"))
+        third = self.engine.ingest("ubuntu", source("Third snapshot"))
         objects = {row[0] for row in self.store.connection.execute("SELECT id FROM objects WHERE kind='source'")}
         # The plan's evidence and the head survive; the unreferenced middle snapshot does not.
         self.assertEqual(objects, {planned_source, third["snapshot_id"]})
@@ -367,7 +407,7 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(pruned and all(set(row) == {"source", "findings", "inventory"} for row in pruned))
 
     def test_repeated_triage_does_not_accumulate_findings_sets(self):
-        self.engine.ingest("debian", source())
+        self.engine.ingest("ubuntu", source())
         for _ in range(3):
             self.at += 1
             self.engine.inventory()
@@ -378,7 +418,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(inventories, 1)
 
     def test_triage_persists_only_plannable_findings_and_records_provenance(self):
-        self.engine.ingest("debian", source())
+        self.engine.ingest("ubuntu", source())
         self.engine.inventory()
         findings = self.engine.triage("fixture-host")
         affected = [row for row in findings if row["status"] == "affected"]
@@ -386,20 +426,20 @@ class EngineTests(unittest.TestCase):
         self.assertTrue(all(row["evidence_acquisition"] == "import" for row in affected))
         stored = self.store.get("findings", self.store.connection.execute("SELECT id FROM objects WHERE kind='findings'").fetchone()[0])
         self.assertEqual(stored["findings"], affected)
-        self.assertEqual(self.engine.poll("debian")["acquisition"], "https")
+        self.assertEqual(self.engine.poll("ubuntu")["acquisition"], "https")
         polled = self.engine.triage("fixture-host")
         self.assertTrue(all(row["evidence_acquisition"] == "https" for row in polled if row["advisory_ids"]))
 
     def test_poll_discards_a_response_when_the_head_changes_during_fetch(self):
-        self.engine.poll("debian")
-        before = self.store.source_health("debian")
+        self.engine.poll("ubuntu")
+        before = self.store.source_health("ubuntu")
         def fetch(source_name, etag=None):
-            self.engine.ingest("debian", source("Concurrent import"))
+            self.engine.ingest("ubuntu", source("Concurrent import"))
             return {"not_modified": False, "raw": source("Older poll response"), "etag": '"late"'}
         self.engine._fetcher = fetch
         with self.assertRaisesRegex(AutoprotectError, "changed during this poll"):
-            self.engine.poll("debian")
-        head = self.store.source_health("debian")
+            self.engine.poll("ubuntu")
+        head = self.store.source_health("ubuntu")
         self.assertEqual(head["acquisition"], "import")
         self.assertEqual(head["revision"], before["revision"] + 1)
         self.assertIsNone(head["error"])
@@ -443,23 +483,23 @@ class EngineTests(unittest.TestCase):
         result = self.engine.ingest("pwn", '{"incidents":[],"trusted":true,"url":"https://attacker.invalid"}')
         self.assertEqual(result["acquisition"], "import")
         self.assertIsNone(result["endpoint"])
-        for invalid in ("https://attacker.invalid", "debian\n", [], None):
+        for invalid in ("https://attacker.invalid", "ubuntu\n", [], None):
             with self.assertRaises(ValidationError):
                 self.engine.poll(invalid)
         self.assertEqual(self.fetch_calls, [])
 
     def test_import_dedup_and_poll_provenance_cannot_be_overwritten(self):
-        imported = self.engine.ingest("debian", source())
+        imported = self.engine.ingest("ubuntu", source())
         self.at += 1
-        same = self.engine.ingest("debian", source())
+        same = self.engine.ingest("ubuntu", source())
         self.assertEqual(imported["snapshot_id"], same["snapshot_id"])
-        https = self.engine.poll("debian")
+        https = self.engine.poll("ubuntu")
         self.assertNotEqual(https["snapshot_id"], imported["snapshot_id"])
         # The replaced import is unreferenced evidence, so it is pruned and audited.
         with self.assertRaisesRegex(ValidationError, "does not exist"):
             self.store.get("source", imported["snapshot_id"])
         self.assertTrue(any(row["event"] == "evidence-pruned" for row in self.engine.audit()))
-        again = self.engine.ingest("debian", source())
+        again = self.engine.ingest("ubuntu", source())
         self.assertEqual(again["snapshot_id"], imported["snapshot_id"])
         self.assertIsNone(again["etag"])
         with self.assertRaisesRegex(ValidationError, "does not exist"):
@@ -467,44 +507,44 @@ class EngineTests(unittest.TestCase):
 
     def test_304_requires_same_source_https_snapshot_and_refreshes_only_contact(self):
         self.response = {"not_modified": True, "raw": None, "etag": '"first"'}
-        missing = self.engine.poll("debian")
+        missing = self.engine.poll("ubuntu")
         self.assertIsNotNone(missing["error"])
         self.assertIsNone(missing["last_success"])
-        self.engine.ingest("debian", source())
-        rejected = self.engine.poll("debian")
+        self.engine.ingest("ubuntu", source())
+        rejected = self.engine.poll("ubuntu")
         self.assertIsNotNone(rejected["error"])
         self.response = {"not_modified": False, "raw": source(), "etag": '"first"'}
-        good = self.engine.poll("debian")
+        good = self.engine.poll("ubuntu")
         body = self.store.get("source", good["snapshot_id"])
         self.at += 20
         self.response = {"not_modified": True, "raw": None, "etag": None}
-        result = self.engine.poll("debian")
+        result = self.engine.poll("ubuntu")
         self.assertEqual(result["snapshot_id"], good["snapshot_id"])
         self.assertEqual(result["last_success"], self.at)
         self.assertEqual(result["etag"], '"first"')
         self.assertEqual(body, self.store.get("source", good["snapshot_id"]))
-        self.assertEqual(self.fetch_calls[-1], ("debian", '"first"'))
+        self.assertEqual(self.fetch_calls[-1], ("ubuntu", '"first"'))
         self.assertIsNotNone(self.engine.poll("pwn")["error"])
         self.assertEqual(self.fetch_calls[-1], ("pwn", None))
 
     def test_poll_failure_and_parse_failure_preserve_good_data_and_error_is_bounded(self):
-        good = self.engine.poll("debian")
+        good = self.engine.poll("ubuntu")
         for failure in (RuntimeError("secret" * 10000), {"not_modified": False, "raw": "{", "etag": '"bad"'},
                         {"not_modified": False, "raw": source(), "etag": "header\ninjection"},
                         {"not_modified": 1, "raw": source(), "etag": None}):
             self.at += 1
             self.response = failure
-            result = self.engine.poll("debian")
+            result = self.engine.poll("ubuntu")
             self.assertEqual(result["snapshot_id"], good["snapshot_id"])
             self.assertEqual(result["last_success"], good["last_success"])
             self.assertEqual(result["etag"], good["etag"])
             self.assertEqual(result["last_attempt"], self.at)
             self.assertNotIn("secret", canonical(result))
         self.response = {"not_modified": True, "raw": None, "etag": '"first"'}
-        self.assertIsNone(self.engine.poll("debian")["error"])
+        self.assertIsNone(self.engine.poll("ubuntu")["error"])
 
     def test_poll_failure_after_head_write_rolls_back_success_before_recording_error(self):
-        good = self.engine.poll("debian")
+        good = self.engine.poll("ubuntu")
         self.at += 1
         self.response["raw"] = source("Changed source awaiting committed acquisition")
         original = self.store.event
@@ -513,18 +553,18 @@ class EngineTests(unittest.TestCase):
                 raise sqlite3.OperationalError("Synthetic failed acquisition audit write")
             original(at, name, details)
         with patch.object(self.store, "event", event):
-            failed = self.engine.poll("debian")
+            failed = self.engine.poll("ubuntu")
         self.assertEqual(failed["snapshot_id"], good["snapshot_id"])
         self.assertEqual(failed["last_success"], good["last_success"])
         self.assertEqual(failed["last_attempt"], self.at)
         self.assertIsNotNone(failed["error"])
 
     def test_import_parse_failure_records_health_without_replacing_snapshot(self):
-        good = self.engine.ingest("debian", source())
+        good = self.engine.ingest("ubuntu", source())
         self.at += 1
         with self.assertRaises(ValidationError):
-            self.engine.ingest("debian", "{")
-        current = self.store.source_health("debian")
+            self.engine.ingest("ubuntu", "{")
+        current = self.store.source_health("ubuntu")
         self.assertEqual(current["snapshot_id"], good["snapshot_id"])
         self.assertEqual(current["last_success"], good["last_success"])
         self.assertIsNotNone(current["error"])
@@ -532,8 +572,8 @@ class EngineTests(unittest.TestCase):
     def test_interrupted_fetch_records_error_then_propagates(self):
         self.response = KeyboardInterrupt()
         with self.assertRaises(KeyboardInterrupt):
-            self.engine.poll("debian")
-        self.assertIsNotNone(self.store.source_health("debian")["error"])
+            self.engine.poll("ubuntu")
+        self.assertIsNotNone(self.store.source_health("ubuntu")["error"])
 
     def test_import_inventory_forces_untrusted_collector_and_does_not_modify_old_snapshot(self):
         collected = self.engine.inventory()
@@ -566,7 +606,7 @@ class EngineTests(unittest.TestCase):
     def test_feed_error_does_not_clear_findings_or_claim_unaffected(self):
         plan = self.prepare()
         self.response = RuntimeError()
-        self.engine.poll("debian")
+        self.engine.poll("ubuntu")
         findings = self.engine.triage("fixture-host")
         self.assertTrue(findings)
         self.assertTrue(all(row["status"] == "unknown" for row in findings))
@@ -577,7 +617,7 @@ class EngineTests(unittest.TestCase):
 
     def test_corrected_source_same_fix_requires_replanning(self):
         plan = self.prepare()
-        self.engine.ingest("debian", source("Corrected description, identical fix"))
+        self.engine.ingest("ubuntu", source("Corrected description, identical fix"))
         with self.assertRaisesRegex(PolicyError, "source head changed"):
             self.engine.execute(plan["id"])
         self.assertEqual(self.store.plan(plan["id"])["status"], "stale")
@@ -644,14 +684,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.engine.execute(plan["id"])["status"], "succeeded")
 
     def test_native_requires_https_native_collection_and_live_assertions(self):
-        self.backend.name = "debian-apt"
-        self.policy = policy(backend="debian-apt")
-        self.engine.ingest("debian", source())
+        self.backend.name = "ubuntu-apt"
+        self.policy = policy(backend="ubuntu-apt")
+        self.engine.ingest("ubuntu", source())
         self.engine.inventory()
         finding = next(r for r in self.engine.triage("fixture-host") if r["status"] == "affected")
         with self.assertRaisesRegex(PolicyError, "poll"):
             self.engine.plan(finding["id"])
-        self.engine.poll("debian")
+        self.engine.poll("ubuntu")
         self.engine.inventory(inventory())
         finding = next(r for r in self.engine.triage("fixture-host") if r["status"] == "affected")
         with self.assertRaisesRegex(PolicyError, "native inventory"):
@@ -667,9 +707,9 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.engine.execute(plan["id"])["status"], "succeeded")
 
     def test_native_target_wrong_configuration_or_origin_is_rejected(self):
-        self.backend.name = "debian-apt"
-        self.policy = policy(backend="debian-apt")
-        self.engine.poll("debian")
+        self.backend.name = "ubuntu-apt"
+        self.policy = policy(backend="ubuntu-apt")
+        self.engine.poll("ubuntu")
         self.engine.inventory()
         finding = next(r for r in self.engine.triage("fixture-host") if r["status"] == "affected")
         for key, value in (("config_digest", "b" * 64), ("origins", [{**ORIGIN, "site": "attacker.invalid"}])):
@@ -706,7 +746,7 @@ class EngineTests(unittest.TestCase):
                 with Store(Path(directory) / "test.db") as store:
                     backend = SyntheticBackend(directory, lambda: self.at)
                     engine = Engine(store, self.provider, backend, clock=lambda: self.at)
-                    engine.ingest("debian", source())
+                    engine.ingest("ubuntu", source())
                     engine.inventory()
                     finding = next(r for r in engine.triage("fixture-host") if r["status"] == "affected")
                     plan = engine.plan(finding["id"])
@@ -787,7 +827,7 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(other.close)
         other.connection.execute("PRAGMA busy_timeout=1")
         def attempt_changes():
-            for action in (lambda: other.record_source("debian", self.at, error="changed"),
+            for action in (lambda: other.record_source("ubuntu", self.at, error="changed"),
                            lambda: other.save_inventory(inventory()),
                            lambda: other.approve({"plan_id": plan["id"], "policy_digest": "b" * 64})):
                 with self.assertRaisesRegex(sqlite3.OperationalError, "locked"), other.transaction():
@@ -967,7 +1007,7 @@ class EngineTests(unittest.TestCase):
         other_store, other_backend, other = self.second_engine()
         # A separate candidate exists in another database before trying the same gate.
         self.backend.path.write_text(canonical(inventory()))
-        other.ingest("debian", source())
+        other.ingest("ubuntu", source())
         other.inventory()
         finding = next(r for r in other.triage("fixture-host") if r["status"] == "affected")
         second = other.plan(finding["id"])
@@ -1193,7 +1233,7 @@ class EngineTests(unittest.TestCase):
         first = self.prepare()
         self.at += 1
         other_store, other_backend, other = self.second_engine()
-        other.ingest("debian", source())
+        other.ingest("ubuntu", source())
         old_inventory = other.inventory()
         finding = next(row for row in other.triage("fixture-host") if row["status"] == "affected")
         old_plan = other.plan(finding["id"])
@@ -1220,7 +1260,7 @@ class EngineTests(unittest.TestCase):
         first = self.prepare()
         self.at += 1
         other_store, _, other = self.second_engine()
-        other.ingest("debian", source())
+        other.ingest("ubuntu", source())
         other.inventory()
         finding = next(row for row in other.triage("fixture-host") if row["status"] == "affected")
         old_plan = other.plan(finding["id"])
@@ -1239,7 +1279,7 @@ class EngineTests(unittest.TestCase):
         first = self.prepare(approve=False)
         self.at += 1
         other_store, _, other = self.second_engine()
-        other.ingest("debian", source())
+        other.ingest("ubuntu", source())
         other.inventory()
         finding = next(row for row in other.triage("fixture-host") if row["status"] == "affected")
         previous = other.plan(finding["id"])
@@ -1259,7 +1299,7 @@ class EngineTests(unittest.TestCase):
     def test_review_import_or_missing_context_cannot_supply_collection_generation(self):
         plan = self.prepare()
         body = self.backend.inspect()
-        for context in ({}, {"backend": "debian-apt", "target_generation": self.backend.generation()}):
+        for context in ({}, {"backend": "ubuntu-apt", "target_generation": self.backend.generation()}):
             with self.subTest(context=context):
                 with self.store.transaction():
                     self.store.save_inventory(body, **context)

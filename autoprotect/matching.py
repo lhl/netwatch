@@ -6,13 +6,13 @@ import re
 from typing import Any
 
 from .core import ValidationError, canonical, digest, identifier, integer, package_name, text
-from .debian import compare_versions
+from .versions import compare_versions
 
 
 _URGENCY = {"high": 80, "medium": 50, "low": 20, "unimportant": 10}
 _SEVERITY = {"critical": 100, "high": 80, "medium": 50, "low": 20}
 _CVE = re.compile(r"CVE-[0-9]{4}-[0-9]{4,}", re.ASCII)
-_DEBIAN_TEMP = re.compile(r"TEMP-[0-9]{7,}-[0-9A-F]{6}", re.ASCII)
+_USN = re.compile(r"USN-[0-9]+-[0-9]+", re.ASCII)
 _MAX_ASSERTIONS = 500_000
 _MAX_ASSOCIATIONS = 300_000
 _MAX_RESULT_BYTES = 64 * 1024 * 1024
@@ -35,8 +35,8 @@ def _assertions(rows: Any) -> dict[tuple[str, str], list[dict]]:
         if not isinstance(row, dict):
             raise ValidationError("advisory must be an object")
         advisory_id = text(row.get("id"), "advisory ID", max_length=128)
-        if not _CVE.fullmatch(advisory_id) and not _DEBIAN_TEMP.fullmatch(advisory_id):
-            raise ValidationError("Debian advisory ID must be a CVE or TEMP identifier")
+        if not _USN.fullmatch(advisory_id):
+            raise ValidationError("Ubuntu advisory ID must be a USN identifier")
         source = package_name(row.get("source_name"), "advisory source package")
         release = identifier(row.get("release"), "advisory release")
         text(row.get("status"), "advisory status", max_length=128)
@@ -44,9 +44,23 @@ def _assertions(rows: Any) -> dict[tuple[str, str], list[dict]]:
         fixed = row.get("fixed_version")
         if fixed is not None:
             text(fixed, "advisory fixed version", max_length=256, allow_empty=True)
+        pocket = row.get("pocket")
+        if pocket is not None:
+            text(pocket, "advisory pocket", max_length=128, allow_empty=True)
+        binaries = row.get("binary_packages", [])
+        if not isinstance(binaries, list) or len(binaries) > 10_000:
+            raise ValidationError("advisory binary packages must be a bounded list")
+        for binary in binaries:
+            package_name(binary, "advisory binary package")
+        cves = row.get("cve_ids", [])
+        if not isinstance(cves, list) or len(cves) > 4096:
+            raise ValidationError("advisory CVEs must be a bounded list")
+        for cve in cves:
+            if not _CVE.fullmatch(text(cve, "advisory CVE", max_length=128)):
+                raise ValidationError("advisory CVE has an invalid format")
         identity = (source, release, advisory_id)
         if identity in identities:
-            raise ValidationError("duplicate Debian assertion identity")
+            raise ValidationError("duplicate Ubuntu assertion identity")
         identities.add(identity)
         index.setdefault((source, release), []).append(row)
     return index
@@ -73,29 +87,27 @@ def _incidents(rows: Any) -> tuple[dict[str, list[dict]], list[dict]]:
         seen_advisories = set()
         for advisory in ids:
             text(advisory, "incident identifier", max_length=128)
-            if _CVE.fullmatch(advisory) and not row["is_example"] and advisory not in seen_advisories:
+            if (_CVE.fullmatch(advisory) or _USN.fullmatch(advisory)) and not row["is_example"] and advisory not in seen_advisories:
                 index.setdefault(advisory, []).append(row)
                 seen_advisories.add(advisory)
     return index, rows
 
 
 def _verdict(package: dict, assertion: dict) -> tuple[str, str]:
-    if _DEBIAN_TEMP.fullmatch(assertion["id"]):
-        return "unknown", "Temporary Debian advisory identifier; investigation required"
     status, fixed = assertion["status"], assertion.get("fixed_version")
-    if status == "resolved" and fixed == "0":
-        return "not_affected", "Debian explicitly marks this release/source package not affected"
-    if status == "open" and not fixed:
-        return "affected", "Debian reports this release/source package affected with no fixed version"
-    if status != "resolved" or not fixed:
-        return "unknown", "Debian status or fixed-version evidence is unresolved or contradictory"
+    if assertion.get("pocket") != "security" or (fixed and "esm" in fixed.lower()):
+        return "unknown", "Ubuntu Pro/ESM, special pockets or missing standard-security evidence are outside supported coverage"
+    if package["name"] not in assertion.get("binary_packages", []):
+        return "unknown", "Ubuntu notice has no explicit standard-security evidence for this binary package"
+    if status != "resolved" or not fixed or fixed == "0":
+        return "unknown", "Ubuntu source fixed-version evidence is missing or unresolved"
     try:
         comparison = compare_versions(package["source_version"], fixed)
     except ValidationError:
-        return "unknown", "Unsupported Debian source/fixed version syntax; no lexical comparison used"
+        return "unknown", "Unsupported Ubuntu source/fixed version syntax; no lexical comparison used"
     if comparison < 0:
-        return "affected", "Installed Debian source version is below the release-specific fix"
-    return "not_affected", "Installed Debian source version meets the release-specific fix"
+        return "affected", "Installed Ubuntu source version is below the Noble security notice fix"
+    return "not_affected", "Installed Ubuntu source version meets the Noble security notice fix"
 
 
 _ACQUISITIONS = (None, "https", "import")
@@ -108,8 +120,8 @@ def _global_reason(inventory: dict, now: int, max_inventory_age: int) -> str | N
         return "Inventory is stale; collect a fresh inventory"
     if not inventory["complete"]:
         return "Inventory is incomplete; missing packages cannot be declared safe"
-    if (inventory["os"], inventory["release"], inventory["architecture"]) != ("debian", "trixie", "amd64"):
-        return "Unsupported platform; only Debian trixie amd64 applicability is implemented"
+    if (inventory["os"], inventory["release"], inventory["architecture"]) != ("ubuntu", "noble", "amd64"):
+        return "Unsupported platform; only Ubuntu 24.04 LTS noble amd64 applicability is implemented"
     return None
 
 
@@ -118,6 +130,8 @@ def _package_reason(package: dict) -> str | None:
         return "Unsupported package ecosystem or architecture"
     if package["status"] != "installed":
         return "Package is not in a fully installed state; investigate package state"
+    if "esm" in package["version"].lower() or "esm" in package["source_version"].lower():
+        return "Ubuntu Pro/ESM installed versions are outside supported coverage"
     return None
 
 
@@ -125,8 +139,7 @@ def _urgency(assertion: dict) -> int:
     return _URGENCY.get(assertion["urgency"].removesuffix("**"), 30)
 
 
-_NOT_AFFECTED = ("Installed Debian source version meets the release-specific fix, "
-                 "or Debian marks it not affected, for every listed advisory")
+_NOT_AFFECTED = "Installed Ubuntu source version meets every listed Noble security notice fix"
 
 
 def _groups(package: dict, applicable: list[dict]) -> list[dict]:
@@ -222,7 +235,7 @@ def match(
     findings: list[dict] = []
     correlated = set()
     association_count = result_bytes = 0
-    imported = "; Debian evidence was imported, not acquired by a fixed-endpoint HTTPS poll"
+    imported = "; Ubuntu evidence was imported, not acquired by a fixed-endpoint HTTPS poll"
 
     global_reason = _global_reason(inventory, now, max_inventory_age)
 
@@ -242,7 +255,7 @@ def match(
             priority_reasons = []
             if covered:
                 highest = max(covered, key=lambda row: (_urgency(row), row["urgency"]))
-                priority_reasons.append("Highest Debian urgency: " + highest["urgency"])
+                priority_reasons.append("Highest Ubuntu urgency: " + highest["urgency"])
             priority_reasons.extend(
                 "Incident " + item["id"] + " severity: " + item["severity"]
                 for item in sorted(related, key=lambda row: row["id"])
@@ -274,12 +287,14 @@ def match(
         findings.append(finding)
 
     def related_to(covered: list[dict]) -> list[dict]:
-        related = {item["id"]: item for assertion in covered for item in incident_index.get(assertion["id"], [])}
+        related = {item["id"]: item for assertion in covered
+                   for alias in [assertion["id"], *assertion.get("cve_ids", [])]
+                   for item in incident_index.get(alias, [])}
         correlated.update(related)
         return [related[key] for key in sorted(related)]
 
-    # Verdicts depend on source identity/version, not on the binary. Compute
-    # them once per source so multi-binary sources do not repeat the work.
+    # Fix comparison uses source versions, but notice coverage is binary-specific.
+    # Cache only identical binary/source/version assessments.
     grouped: dict[tuple, list[dict]] = {}
     for package in inventory["packages"]:
         reason = global_reason or _package_reason(package)
@@ -298,7 +313,7 @@ def match(
             priority = max([_urgency(row) for row in applicable] + [_SEVERITY.get(item["severity"], 30) for item in related])
             append(package, applicable, "unknown", reason + held, related, priority)
             continue
-        key = (package["source_name"], package["source_version"])
+        key = (package["name"], package["source_name"], package["source_version"])
         if key not in grouped:
             grouped[key] = _groups(package, applicable)
         for group in grouped[key]:

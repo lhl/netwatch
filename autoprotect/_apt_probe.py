@@ -1,9 +1,9 @@
 """Isolated system-python probe for local authenticated APT metadata.
 
-Run only through DebianApt's fixed argument arrays. python3-apt is imported in
+Run only through UbuntuApt's fixed argument arrays. python3-apt is imported in
 main, never at module import. This helper does not refresh indexes or install
 packages. It supports HTTP or HTTPS deb sources with explicit Signed-By key
-files, fixed Debian codenames and the standard APT/dpkg filesystem locations.
+files, fixed Ubuntu noble suites and the standard APT/dpkg filesystem locations.
 Transport is not the authority: every candidate requires a signed InRelease,
 matching Packages hashes and the exact artifact hash.
 """
@@ -28,7 +28,7 @@ MAX_INDEX = 512 * 1024 * 1024
 MAX_CONTROL = 1024 * 1024
 MAX_KEYRING = 4 * 1024 * 1024
 MAX_RELEASES = 1024
-CODENAMES = {"trixie", "trixie-updates", "trixie-security"}
+SUITES = {"noble", "noble-updates", "noble-security"}
 ORIGIN_FIELDS = ("origin", "label", "archive", "codename", "component", "site")
 KEYRING_DIRECTORIES = (Path("/usr/share/keyrings"), Path("/etc/apt/keyrings"))
 # Required owner of every trusted APT/dpkg input. Tests substitute the invoking
@@ -63,9 +63,9 @@ def _contained(path, roots):
 def _safe_link(path, roots):
     """Accept a root-owned symlink only if it resolves inside a checked root.
 
-    Debian ships such links (for example /etc/dpkg/origins/default and the
-    debian-archive-keyring *.gpg -> *.pgp aliases). The link text is part of
-    the fingerprint; its target is fingerprinted as an ordinary entry of the
+    Distribution configuration can contain links such as
+    /etc/dpkg/origins/default. The link text is part of the fingerprint;
+    its target is fingerprinted as an ordinary entry of the
     same tree, so a link can never import unchecked bytes.
     """
     info = path.lstat()
@@ -144,7 +144,7 @@ def _fingerprint_tree(roots, *, limit, skip=()):
 
 
 def _paragraphs(raw):
-    """Strict case-insensitive Debian control parser, preserving continuations."""
+    """Strict case-insensitive package control parser, preserving continuations."""
     if not isinstance(raw, str) or len(raw) > 4 * 1024 * 1024:
         raise ProbeError("control metadata exceeds its size limit")
     if any((ord(c) < 32 and c not in "\n\t") or ord(c) == 127 for c in raw):
@@ -185,9 +185,11 @@ def _source_entry(uri, suite, components, key, architectures="amd64"):
             or parsed.query or parsed.fragment or parsed.port not in ports[parsed.scheme]
             or any(ord(c) <= 32 or ord(c) >= 127 for c in uri) or "%" in uri):
         raise ProbeError("APT sources require plain HTTP(S) archive URLs without credentials or query strings")
-    if suite not in CODENAMES or architectures != "amd64":
-        raise ProbeError("APT source suite or architecture is unsupported")
-    if not components or any(c not in ("main", "contrib", "non-free", "non-free-firmware") for c in components):
+    if "esm" in (parsed.hostname or "").lower() or "esm" in suite.lower():
+        raise ProbeError("Ubuntu Pro/ESM repositories are outside supported remediation")
+    if suite not in SUITES or architectures != "amd64":
+        raise ProbeError("APT sources require noble, noble-updates or noble-security on amd64")
+    if not components or any(c not in ("main", "restricted", "universe", "multiverse") for c in components):
         raise ProbeError("APT source component is unsupported")
     keypath = Path(key)
     if (not keypath.is_absolute() or keypath.parent not in KEYRING_DIRECTORIES
@@ -414,8 +416,14 @@ def _signed_release(apt_pkg, source):
     raw = _read(release, 4 * 1024 * 1024)
     _verify_release(source["key"], release)
     fields = _release_fields(raw)
-    if fields.get("codename") != source["suite"]:
-        raise ProbeError("signed Release codename differs from the configured codename")
+    if any("esm" in fields.get(key, "").lower() for key in ("origin", "label", "suite")):
+        raise ProbeError("Ubuntu Pro/ESM repositories are outside supported remediation")
+    if fields.get("origin") != "Ubuntu" or fields.get("label") != "Ubuntu":
+        raise ProbeError("signed Release must have Ubuntu origin and label")
+    # Ubuntu pockets share Codename: noble; Suite identifies the exact pocket.
+    if (source["suite"] not in SUITES or fields.get("suite") != source["suite"]
+            or fields.get("codename") != "noble"):
+        raise ProbeError("signed Release requires codename noble and the exact configured supported suite")
     return fields
 
 

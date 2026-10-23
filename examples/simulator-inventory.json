@@ -2,8 +2,8 @@
   "schema_version": 1,
   "asset_id": "example-host",
   "observed_at": 0,
-  "os": "debian",
-  "release": "trixie",
+  "os": "ubuntu",
+  "release": "noble",
   "architecture": "amd64",
   "complete": true,
   "packages": [

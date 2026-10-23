@@ -1,6 +1,6 @@
 # Security feeds, patch intelligence, and inventory
 
-Research checked on **2026-10-22**. This document recommends sources and adapter behavior; it does not claim that application adapters have been implemented. Detailed references cover [authoritative advisory sources](research/ADVISORIES.md) and [distribution patch data and inventory](research/INVENTORY.md).
+General source research was checked on **2026-10-22**; the dated observations below remain scoped to those sources. The active product target is **Ubuntu 24.04 LTS (`noble`), `amd64`**. Canonical USN source research was verified on **2026-10-23** and is recorded in [UBUNTU.md](research/UBUNTU.md); it does not establish privileged Ubuntu qualification. Other references cover [authoritative advisory sources](research/ADVISORIES.md) and [inventory and package authority](research/INVENTORY.md).
 
 ## Assessment
 
@@ -15,6 +15,20 @@ The initial system should combine:
 5. Fresh inventories tied to stable asset identities, deployment artifacts, and package ecosystems.
 
 News, model-generated advice, source links, CVSS, and package availability alone cannot authorize an administrative action.
+
+## Ubuntu source integration status
+
+The applicability source ID `ubuntu` uses Canonical's Ubuntu Security Notice (USN) JSON database at **`https://usn.ubuntu.com/usn-db/database.json`**. The [verified source record](research/UBUNTU.md) documents the complete 2026-10-23 retrieval, schema, corroborating notice pages and limitations. This is **published-update evidence, not complete CVE affected-version coverage**. OVAL and the paginated CVE JSON API are not parsed by this implementation.
+
+The raw object is keyed by numeric notice ID, which must agree with its inner `id`. `releases.noble.sources` supplies source-version fixes; `releases.noble.allbinaries` supplies explicit binary-to-source and pocket membership. Only valid nonzero non-ESM source fixes with usable `security`-pocket evidence for all linked binaries are assessable. The matcher also requires the installed binary to be listed. The raw `binaries` map alone is not sufficient. Missing Noble/source/binary/fix evidence, mixed or special pockets, and ESM-labelled installed versions remain unknown. A notice from another release cannot supply a Noble fix.
+
+Assertion identity is `(source_name, release, USN ID)`. A notice creates one assertion per source, not one per source/CVE combination. Findings and plans bind USN IDs; notice-level CVE references can correlate pwn incidents but do not prove that each CVE affects every listed package. `affected` means below the supported source fix; `not_affected` means the installed source meets that notice's update requirement. Neither verdict is complete vulnerability coverage. The database supplies no authoritative severity field, so normalized urgency is `unknown`; incident severity can affect ordering, never authority.
+
+The supported remediation scope is standard Ubuntu 24.04 LTS noble on amd64, with architecture-independent packages where applicable. Native repository origins require `origin=Ubuntu`, `label=Ubuntu`, `codename=noble`, and `archive` equal to `noble`, `noble-updates` or `noble-security`. Exact component and site allowlists still apply. Backports, Ubuntu Pro and Expanded Security Maintenance (ESM), realtime and FIPS channels are excluded even when the host has entitlement. Notice pocket evidence establishes the supported update requirement; authenticated local APT metadata separately selects an available artifact from an approved archive.
+
+Raw and decoded Ubuntu feed budgets are **512 MiB**, with 32,000,000 JSON nodes and depth 32. Parsing retains the whole object and requires memory beyond the response size; those caps are not a memory quota or parser deadline. The dated response was 354,359,354 bytes. The parser fixture `tests/fixtures/feeds/ubuntu.json` and walkthrough input `examples/ubuntu-synthetic.json` are synthetic notice-format JSON, not a retained publisher corpus. No feed action, URL or checksum becomes an installation instruction.
+
+The source contract is established. The Ubuntu offline baseline, module/installed demos, packaging and both simulator workflows passed as recorded in [REVIEW.md](REVIEW.md); latest native-regression results and independent-review approval remain open. No privileged Ubuntu APT/download/lock/install/recovery qualification has been performed. Public availability does not establish complete coverage, stable schema, redistribution terms or a service guarantee.
 
 ## pwn.watch: verified interfaces
 
@@ -61,12 +75,12 @@ The [observation metadata](research/PWN-WATCH-SNAPSHOT.json) records sizes, dige
 | Confirmed exploitation signal | CISA KEV, explicit vendor exploitation statements | That the source reports exploitation of the referenced vulnerability. | Exploitation on our asset; completeness of all exploited vulnerabilities. |
 | Exploitation probability | FIRST EPSS | A dated probability estimate for a published CVE, for the model's stated horizon. | Severity, asset exposure, or a finding that a low-scoring vulnerability is safe. |
 | Application package applicability | OSV, reviewed GitHub advisories, vendor release/security advisories | Package ecosystem, identity, affected ranges or versions, fixed events, withdrawal/correction metadata where provided. | Dependency reachability, compatible upgrades, or trustworthy artifacts merely because a version is listed. |
-| Distribution package applicability | Debian security tracker, Ubuntu OVAL/USN, Red Hat CSAF/OVAL, Alpine secdb | Distribution/release-specific status and fixed package versions. | That the candidate is in our configured repositories or that a new kernel is running. |
+| Distribution package applicability | Canonical Ubuntu security data, Red Hat CSAF/OVAL, Alpine secdb | Distribution/release-specific status and fixed package versions. | That the candidate is in our configured repositories or that a new kernel is running. |
 | CVE identity and enrichment | CVE List V5, NVD | Published/rejected identifiers, descriptions, references, scores, and product-matching data where available. | A complete package patch list or authoritative distribution backport comparison. |
 | Product-specific status exchange | CSAF and VEX documents from an authenticated publisher | Structured product and vulnerability status scoped to a particular document and product identity. | Universal safety for every artifact sharing a product name; a trustworthy suppression without publisher and scope checks. |
 | Installable remediation target | Approved, authenticated package repositories and local package-manager policy | Available candidate, origin, architecture, dependency resolution, and package authentication status. | That an update fixes the finding or is operationally safe without advisory evidence and verification. |
 
-Official endpoints, API limits, terms, and semantic details are in [ADVISORIES.md](research/ADVISORIES.md) and [INVENTORY.md](research/INVENTORY.md). Do not flatten these sources into one undifferentiated “trusted feed.” Keep each assertion's origin, record ID, modification time, and evidence type.
+Official endpoints, API limits, terms and semantic details are in [ADVISORIES.md](research/ADVISORIES.md) and [UBUNTU.md](research/UBUNTU.md); [INVENTORY.md](research/INVENTORY.md) covers package identity and execution boundaries. Do not flatten these sources into one undifferentiated “trusted feed.” Keep each assertion's origin, record ID, modification time, and evidence type.
 
 ## Inventory and matching recommendations
 
@@ -78,7 +92,7 @@ Matching must return at least `affected`, `not_affected`, and `unknown`, with re
 
 Do not compare arbitrary version strings lexically. Use the ecosystem's comparator or a vetted scanner. Distribution backports are the decisive counterexample: an old-looking upstream version may contain the fix, while a newer-looking package from another origin may not. Package installation and runtime activation are distinct: kernel and service findings may require reboot/restart and a new runtime observation.
 
-The first real backend should be narrow enough to test thoroughly: read-only Debian-family package inventory, release-specific vulnerability evidence, and exact-version APT remediation from approved repositories. Scope supported distribution releases explicitly in the design. Handle application and container findings through their own evidence paths; do not install a PyPI or npm version into a system package merely because names resemble each other.
+The native target is narrowly scoped: read-only Ubuntu 24.04 LTS noble amd64 inventory, supported USN missing-update evidence with explicit binary membership, and exact-version APT remediation from approved standard repositories. Pro/ESM, special channels and the backports archive are outside that remediation scope. Handle application and container findings through their own evidence paths; do not install a PyPI or npm version into a system package merely because names resemble each other.
 
 ## Claim checks and limitations
 

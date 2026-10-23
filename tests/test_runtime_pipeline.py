@@ -21,7 +21,7 @@ def inputs():
     """Complete synthetic inputs, with an unrelated package for delta checks."""
     inventory = {
         "schema_version": 1, "asset_id": "integration-host", "observed_at": now(),
-        "os": "debian", "release": "trixie", "architecture": "amd64",
+        "os": "ubuntu", "release": "noble", "architecture": "amd64",
         "collector": "imported", "complete": True,
         "packages": [
             {"ecosystem": "deb", "name": "libexample1", "version": "1:1.0-1+b8",
@@ -33,12 +33,12 @@ def inputs():
         ],
     }
     origin = {"origin": "Autoprotect-Synthetic", "label": "Autoprotect-Synthetic",
-              "archive": "stable-security", "codename": "trixie-security",
+              "archive": "noble-security", "codename": "noble",
               "component": "main", "site": "example.invalid"}
     target = {
         "name": "libexample1", "architecture": "amd64", "from_version": "1:1.0-1+b8",
-        "to_version": "1:1.0-1+deb13u2+b1", "source_name": "example-source",
-        "source_version": "1:1.0-1+deb13u2", "sha256": digest({"synthetic_artifact": 1}),
+        "to_version": "1:1.0-1+ubuntu0.24.04.2+b1", "source_name": "example-source",
+        "source_version": "1:1.0-1+ubuntu0.24.04.2", "sha256": digest({"synthetic_artifact": 1}),
         "size": 1024, "origins": [origin], "config_digest": digest({"synthetic_config": 1}),
         "metadata_digest": digest({"synthetic_metadata": 1}),
     }
@@ -66,7 +66,7 @@ class RuntimePipelineTests(unittest.TestCase):
         self.seed(self.engine)
 
     def seed(self, engine):
-        for source in ("pwn", "debian"):
+        for source in ("pwn", "ubuntu"):
             engine.ingest(source, (FIXTURES / (source + ".json")).read_bytes())
         engine.inventory()
         return engine.triage("integration-host")
@@ -74,7 +74,7 @@ class RuntimePipelineTests(unittest.TestCase):
     def plan(self, engine=None):
         engine = engine or self.engine
         findings = engine.triage("integration-host")
-        row = next(item for item in findings if "CVE-2026-10001" in item["advisory_ids"])
+        row = next(item for item in findings if "USN-10001-1" in item["advisory_ids"])
         self.assertEqual(row["status"], "affected")
         return engine.plan(row["id"])
 
@@ -96,10 +96,10 @@ class RuntimePipelineTests(unittest.TestCase):
         after = self.simulator.inspect()
         expected = copy.deepcopy(before["packages"])
         package = next(row for row in expected if row["name"] == "libexample1")
-        package.update(version="1:1.0-1+deb13u2+b1", source_version="1:1.0-1+deb13u2")
+        package.update(version="1:1.0-1+ubuntu0.24.04.2+b1", source_version="1:1.0-1+ubuntu0.24.04.2")
         self.assertEqual(after["packages"], expected)
         rows = self.engine.triage("integration-host")
-        self.assertEqual(next(row for row in rows if "CVE-2026-10001" in row["advisory_ids"])["status"], "not_affected")
+        self.assertEqual(next(row for row in rows if "USN-10001-1" in row["advisory_ids"])["status"], "not_affected")
         self.assertTrue(any(row["status"] == "unknown" for row in rows))
         with self.assertRaises(AutoprotectError):
             self.engine.execute(plan["id"])

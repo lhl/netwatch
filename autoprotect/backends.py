@@ -1,4 +1,4 @@
-"""Disposable simulation and a single-package, opt-in Debian backend.
+"""Disposable simulation and a single-package, opt-in Ubuntu backend.
 
 Backends enforce local invariants, not approvals. Engine owns authorization,
 claim persistence and independent full-inventory verification. A retained gate
@@ -22,7 +22,7 @@ import threading
 
 from .core import (BackendError, IndeterminateError, PolicyError, ValidationError,
                    canonical, identifier, integer, load_json, now, package_name, text, version)
-from .debian import compare_versions
+from .versions import compare_versions
 from .inventory import collect_local, inventory_fingerprint, normalize_inventory
 from .local_files import _directory as _checked_directory, _directory_info, _path
 from .runner import Runner
@@ -30,7 +30,8 @@ from .runner import Runner
 _TARGET_FIELDS = {"name", "architecture", "from_version", "to_version", "source_name",
                   "source_version", "sha256", "size", "origins", "config_digest", "metadata_digest"}
 _ORIGIN_FIELDS = {"origin", "label", "archive", "codename", "component", "site"}
-_CODENAMES = {"trixie", "trixie-updates", "trixie-security"}
+_SUITES = {"noble", "noble-updates", "noble-security"}
+_COMPONENTS = {"main", "restricted", "universe", "multiverse"}
 MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 _MAX_STATE_BYTES = 64 * 1024 * 1024
 _MAX_GATE_BYTES = 4096
@@ -96,8 +97,8 @@ def _ready(inventory, collector):
     normalized = normalize_inventory(inventory, collector=collector)
     if normalized != inventory:
         raise BackendError("backend requires a complete normalized inventory")
-    if (inventory["os"], inventory["release"], inventory["architecture"]) != ("debian", "trixie", "amd64"):
-        raise BackendError("backend supports only Debian trixie on amd64")
+    if (inventory["os"], inventory["release"], inventory["architecture"]) != ("ubuntu", "noble", "amd64"):
+        raise BackendError("backend supports only Ubuntu 24.04 LTS noble on amd64")
     if not inventory["complete"] or not inventory["packages"]:
         raise BackendError("complete nonempty inventory is required")
     # Foreign-architecture (multiarch) packages may be present; only the target
@@ -124,7 +125,7 @@ def _policy(policy, inventory, package, backend, *, applying=False):
         raise PolicyError("asset is not allowed by policy")
     if package["name"] not in policy.get("allowed_packages", []):
         raise PolicyError("package is not allowed by policy")
-    if backend == "debian-apt":
+    if backend == "ubuntu-apt":
         if any(policy.get(key) is not True for key in
                ("allow_maintainer_scripts", "recovery_confirmed", "trusted_installed_lineage")):
             raise PolicyError("native operations require script, recovery and installed-lineage acknowledgements")
@@ -163,10 +164,9 @@ def _check_release_times(constraints, max_age):
     """Check retained, validated bounds only; no I/O or candidate recomputation.
 
     Every contributing Release must be no older than max_repository_age, and
-    any Valid-Until must still be in the future. Debian's stable suite has no
-    Valid-Until and changes its Date only at point releases, so policies that
-    accept candidates from it need an age bound spanning a release cycle;
-    suites with Valid-Until (updates, security) remain bounded by expiry.
+    any Valid-Until must still be in the future. An absent Valid-Until does not
+    waive the Date bound. Fetch time is not signed publication time; an old
+    base-suite Release can therefore be rejected even after an index refresh.
     """
     timestamp = integer(now(), "current repository-check time")
     for date, expiry in constraints:
@@ -176,7 +176,7 @@ def _check_release_times(constraints, max_age):
             raise BackendError("repository metadata is stale, future-dated or expired: Release Valid-Until has passed")
         if timestamp - date > max_age:
             raise BackendError("repository metadata is stale, future-dated or expired: Release Date is older than "
-                               "max_repository_age (stable suites change Date only at point releases)")
+                               "max_repository_age; refreshing indexes does not renew the signed Date")
 
 
 def _release_constraints(target, releases, policy):
@@ -616,8 +616,8 @@ class Simulator(_Gated):
         return {"backend": self.name, "installed_version": target["to_version"], "synthetic": True}
 
 
-class DebianApt(_Gated):
-    """Fixed local Debian backend. Constructor injection is for offline tests only.
+class UbuntuApt(_Gated):
+    """Fixed local Ubuntu backend. Constructor injection is for offline tests only.
 
     System python3-apt, apt-get, apt-helper, gpgv and dpkg are prerequisites.
     Neither the probe nor this module refreshes indexes. Configuration, keys,
@@ -626,7 +626,7 @@ class DebianApt(_Gated):
     no default is available (--force-confdef --force-confold). No rollback runs.
     """
 
-    name = "debian-apt"
+    name = "ubuntu-apt"
 
     def __init__(self, runner=None, *, live=False):
         if type(live) is not bool:
@@ -730,8 +730,12 @@ class DebianApt(_Gated):
             raise PolicyError("APT configuration or keyrings differ from the approved digest")
         allowed = policy.get("allowed_origins", [])
         for origin in target["origins"]:
-            if origin not in allowed or origin["codename"] not in _CODENAMES:
-                raise PolicyError("candidate origin or codename is not approved")
+            if any("esm" in origin[key].lower() for key in ("origin", "label", "archive", "site")):
+                raise PolicyError("Ubuntu Pro/ESM repositories are outside supported remediation")
+            if (origin not in allowed or origin["origin"] != "Ubuntu" or origin["label"] != "Ubuntu"
+                    or origin["archive"] not in _SUITES or origin["codename"] != "noble"
+                    or origin["component"] not in _COMPONENTS):
+                raise PolicyError("candidate requires an approved Ubuntu noble origin, suite and component")
         constraints, age = _release_constraints(target, data["releases"], policy)
         self._simulate(target)
         return target, constraints, age

@@ -97,14 +97,14 @@ class CoreTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 identifier(value)
 
-    def test_debian_version_syntax(self):
-        for value in ("1", "1.2.3-1+deb13u1", "2:1.0~rc1-1+b2", "1:1:2-3", "0"):
+    def test_dpkg_version_syntax(self):
+        for value in ("1", "1.2.3-1+u1", "2:1.0~rc1-1+b2", "1:1:2-3", "0"):
             self.assertEqual(version(value), value)
         for value in ("-1", "1;id", "1\n", "x:1", "1-", "1-2:3", "v1", "1_2", "1/2"):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 version(value)
 
-    def test_debian_epoch_native_bounds(self):
+    def test_dpkg_epoch_native_bounds(self):
         for epoch in ("2147483647", "0002147483647"):
             self.assertEqual(version(epoch + ":1"), epoch + ":1")
         for epoch in ("2147483648", "0002147483648", "9" * 100):

@@ -19,7 +19,7 @@ import sqlite3
 from .core import AutoprotectError, PolicyError, ValidationError, canonical, digest, identifier, integer, load_json
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _PRUNABLE = ("source", "findings", "inventory")
 _EXPECTED_TABLES = {"objects", "source_health", "inventory_heads", "finding_index", "finding_sets", "plan_status",
                     "approval_heads", "outcomes", "audit"}
@@ -53,11 +53,13 @@ class Store:
                     "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
                 ).fetchall()
                 names = {row[0] for row in tables}
-                if version == 2 and names == _EXPECTED_TABLES - {"finding_sets"}:
-                    self._migrate_from_2()
-                elif version != SCHEMA_VERSION:
+                if version != SCHEMA_VERSION:
                     if version != 0 or tables:
-                        raise ValidationError("Unsupported store schema version; use a compatible application")
+                        raise ValidationError(
+                            f"Unsupported store schema version {version}; use a fresh state directory. "
+                            f"This build requires schema {SCHEMA_VERSION} and does not migrate, "
+                            "reinterpret, or silently discard prior records or approvals."
+                        )
                     self._initialize()
                 elif names != _EXPECTED_TABLES:
                     raise ValidationError("Store schema is incomplete or unsupported")
@@ -71,12 +73,12 @@ class Store:
                 id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('source','inventory','findings','plan','approval')),
                 body TEXT NOT NULL)""",
             """CREATE TABLE source_health (
-                source TEXT PRIMARY KEY CHECK(source IN ('pwn','debian')),
+                source TEXT PRIMARY KEY CHECK(source IN ('pwn','ubuntu')),
                 snapshot_id TEXT REFERENCES objects(id), acquisition TEXT, endpoint TEXT, etag TEXT,
                 last_attempt INTEGER NOT NULL, last_success INTEGER, error TEXT, revision INTEGER NOT NULL)""",
             """CREATE TABLE inventory_heads (
                 asset_id TEXT PRIMARY KEY, inventory_id TEXT NOT NULL REFERENCES objects(id),
-                backend TEXT CHECK(backend IN ('simulator','debian-apt')), target_generation TEXT,
+                backend TEXT CHECK(backend IN ('simulator','ubuntu-apt')), target_generation TEXT,
                 CHECK((backend IS NULL AND target_generation IS NULL) OR
                       (backend IS NOT NULL AND target_generation IS NOT NULL)))""",
             """CREATE TABLE finding_index (
@@ -114,17 +116,6 @@ class Store:
     _OBJECT_DELETE = ("CREATE TRIGGER immutable_objects_delete BEFORE DELETE ON objects "
                       "WHEN OLD.kind NOT IN ('source','findings','inventory') "
                       "BEGIN SELECT RAISE(ABORT, 'immutable record'); END")
-
-    def _migrate_from_2(self):
-        """Add findings-set metadata and evidence retention; keep every record."""
-        self.connection.execute(self._FINDING_SETS)
-        for (key,) in self.connection.execute("SELECT id FROM objects WHERE kind='findings'").fetchall():
-            body = self.get("findings", key)
-            self.connection.execute("INSERT INTO finding_sets VALUES (?,?,?)",
-                                    (key, body.get("inventory_id"), body.get("source_digest")))
-        self.connection.execute("DROP TRIGGER immutable_objects_delete")
-        self.connection.execute(self._OBJECT_DELETE)
-        self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
     def transaction(self):
@@ -201,8 +192,8 @@ class Store:
 
     def record_source(self, source, at, *, body=None, etag=None, error=None):
         self._writing()
-        if source not in ("pwn", "debian"):
-            raise ValidationError("Source must be pwn or debian")
+        if source not in ("pwn", "ubuntu"):
+            raise ValidationError("Source must be pwn or ubuntu")
         integer(at, "source attempt time")
         previous = self.source_health(source)
         if error is not None:
@@ -239,7 +230,7 @@ class Store:
         """
         self._writing()
         if backend is not None or target_generation is not None:
-            if backend not in ("simulator", "debian-apt") or target_generation is None:
+            if backend not in ("simulator", "ubuntu-apt") or target_generation is None:
                 raise ValidationError("Collection context requires a supported backend and its generation")
             content_id(target_generation)
         key = self.put("inventory", body)
@@ -352,7 +343,7 @@ class Store:
 
         Retained: source heads and every plan's source snapshot; findings sets
         referenced by a plan, or built from a current inventory head and the
-        current Debian head; inventory heads and every inventory named by a
+        current Ubuntu head; inventory heads and every inventory named by a
         plan, outcome or retained findings set. Returns deleted counts by kind.
         """
         self._writing()
@@ -361,8 +352,8 @@ class Store:
             "SELECT snapshot_id FROM source_health WHERE snapshot_id IS NOT NULL")}
         keep_sources |= {plan["source_digest"] for plan in plans if "source_digest" in plan}
         heads = {row[0] for row in self.connection.execute("SELECT inventory_id FROM inventory_heads")}
-        debian = self.connection.execute("SELECT snapshot_id FROM source_health WHERE source='debian'").fetchone()
-        current_source = debian[0] if debian else None
+        ubuntu = self.connection.execute("SELECT snapshot_id FROM source_health WHERE source='ubuntu'").fetchone()
+        current_source = ubuntu[0] if ubuntu else None
         keep_sets = set()
         for plan in plans:
             if "finding_id" in plan:

@@ -30,14 +30,14 @@ HOSTILE = "Untrusted \x1b[31m text\n$(never-execute); 日本語\u202e"
 def fixtures():
     inventory = {
         "schema_version": 1, "asset_id": ASSET, "observed_at": now(),
-        "os": "debian", "release": "trixie", "architecture": "amd64",
+        "os": "ubuntu", "release": "noble", "architecture": "amd64",
         "collector": "native", "complete": True,
         "packages": [{"ecosystem": "deb", "name": "example-package", "version": "1.0-1",
                       "source_name": "example-source", "source_version": "1.0-1",
                       "architecture": "amd64", "status": "installed", "held": False}],
     }
-    origin = {"origin": "Synthetic", "label": "Synthetic", "archive": "stable-security",
-              "codename": "trixie-security", "component": "main", "site": "example.invalid"}
+    origin = {"origin": "Ubuntu", "label": "Ubuntu", "archive": "noble-security",
+              "codename": "noble", "component": "main", "site": "example.invalid"}
     catalog = [{"name": "example-package", "architecture": "amd64", "from_version": "1.0-1",
                 "to_version": "1.0-2", "source_name": "example-source", "source_version": "1.0-2",
                 "sha256": digest("synthetic artifact"), "size": 123, "origins": [origin],
@@ -48,11 +48,14 @@ def fixtures():
               "max_inventory_age": 300, "max_feed_age": 300, "max_repository_age": 300,
               "plan_ttl": 300, "approval_ttl": 300, "allow_maintainer_scripts": False,
               "recovery_confirmed": False, "trusted_installed_lineage": False}
-    debian = {"example-source": {CVE: {"description": HOSTILE,
-              "releases": {"trixie": {"status": "resolved", "fixed_version": "1.0-2", "urgency": "high"}}}}}
+    ubuntu = {"10001-1": {"id": "10001-1", "description": HOSTILE, "cves": [CVE],
+              "releases": {"noble": {
+                  "sources": {"example-source": {"version": "1.0-2"}},
+                  "allbinaries": {"example-package": {"source": "example-source",
+                      "version": "1.0-2", "pocket": "security"}}}}}}
     pwn = {"incidents": [{"slug": "cli-incident", "title": HOSTILE, "summary": HOSTILE,
                          "cveIds": [CVE], "severity": "high", "isExample": False}]}
-    return inventory, catalog, policy, debian, pwn
+    return inventory, catalog, policy, ubuntu, pwn
 
 
 class CliTests(unittest.TestCase):
@@ -61,15 +64,15 @@ class CliTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.state = self.root / "state"
-        self.inventory, self.catalog, self.policy, self.debian, self.pwn = fixtures()
+        self.inventory, self.catalog, self.policy, self.ubuntu, self.pwn = fixtures()
         self.policy_path = self.save("policy.json", self.policy, private=True)
         self.inventory_path = self.save("inventory.json", self.inventory)
         self.catalog_path = self.save("catalog.json", self.catalog)
-        self.debian_path = self.save("debian.json", self.debian)
+        self.ubuntu_path = self.save("ubuntu.json", self.ubuntu)
         self.pwn_path = self.save("pwn.json", self.pwn)
         # Every in-process test fails closed if dispatch accidentally reaches a
         # real native constructor, collector, runner or network fetcher.
-        for target in ("autoprotect.cli.DebianApt", "autoprotect.backends.collect_local",
+        for target in ("autoprotect.cli.UbuntuApt", "autoprotect.backends.collect_local",
                        "autoprotect.runner.Runner.run", "autoprotect.feeds.fetch_source"):
             mock = patch(target, side_effect=AssertionError("unexpected native or network operation"))
             mock.start()
@@ -112,13 +115,13 @@ class CliTests(unittest.TestCase):
 
     def seed(self):
         self.initialize()
-        for source in ("pwn", "debian"):
+        for source in ("pwn", "ubuntu"):
             self.invoke("import-feed", source, self.root / (source + ".json"))
         self.invoke("inventory")
 
     def plan(self):
         rows = self.invoke("triage", ASSET)
-        finding = next(row for row in rows if CVE in row["advisory_ids"])
+        finding = next(row for row in rows if "USN-10001-1" in row["advisory_ids"])
         self.assertEqual(finding["status"], "affected")
         return self.invoke("plan", finding["id"])
 
@@ -157,7 +160,7 @@ class CliTests(unittest.TestCase):
         audit = self.invoke("audit")
         self.assertTrue(any(row["event"] == "plan-approved" for row in audit))
         findings = self.invoke("triage", ASSET)
-        self.assertEqual(next(row for row in findings if CVE in row["advisory_ids"])["status"], "not_affected")
+        self.assertEqual(next(row for row in findings if "USN-10001-1" in row["advisory_ids"])["status"], "not_affected")
 
     def test_auto_workflow_changes_state_without_approval(self):
         self.write_policy(mode="auto")
@@ -178,15 +181,15 @@ class CliTests(unittest.TestCase):
     def test_auto_allowlist_denial(self):
         self.write_policy(mode="auto", allowed_packages=["another-package"])
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in self.invoke("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         self.invoke("plan", finding["id"], expected=1)
         self.assertEqual(self.invoke("queue"), [])
         self.assertEqual(self.invoke("inventory")["body"]["packages"][0]["version"], "1.0-1")
 
     def test_import_deduplication_provenance_and_export_escaping(self):
         self.seed()
-        first = self.invoke("import-feed", "debian", self.debian_path)
-        second = self.invoke("import-feed", "debian", self.debian_path)
+        first = self.invoke("import-feed", "ubuntu", self.ubuntu_path)
+        second = self.invoke("import-feed", "ubuntu", self.ubuntu_path)
         self.assertEqual(first["snapshot_id"], second["snapshot_id"])
         self.assertEqual(second["acquisition"], "import")
         self.assertIsNone(second["endpoint"])
@@ -203,12 +206,12 @@ class CliTests(unittest.TestCase):
             context = store.inventory_context(ASSET)
             self.assertIsNone(context["backend"])
             self.assertIsNone(context["target_generation"])
-        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in self.invoke("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         self.invoke("plan", finding["id"], expected=1)
 
     def test_feed_cannot_supply_provenance_even_when_policy_is_native(self):
         self.native_policy()
-        for source in ("pwn", "debian"):
+        for source in ("pwn", "ubuntu"):
             for field in ("acquisition", "provenance"):
                 path = self.save("spoof.json", {field: "https"})
                 result = self.invoke("import-feed", source, path, expected=1)
@@ -217,12 +220,12 @@ class CliTests(unittest.TestCase):
 
     def test_poll_success_and_failure_use_runtime_health_and_exit_codes(self):
         with patch("autoprotect.feeds.fetch_source", return_value={"not_modified": False,
-                   "raw": self.debian_path.read_bytes(), "etag": '"fixture"'}) as fetch:
-            result = self.invoke("poll", "debian")
+                   "raw": self.ubuntu_path.read_bytes(), "etag": '"fixture"'}) as fetch:
+            result = self.invoke("poll", "ubuntu")
             self.assertEqual(result["acquisition"], "https")
-            fetch.assert_called_once_with("debian", etag=None)
+            fetch.assert_called_once_with("ubuntu", etag=None)
         with patch("autoprotect.feeds.fetch_source", side_effect=OSError("raw secret \x1b")):
-            failed = self.invoke("poll", "debian", expected=1)
+            failed = self.invoke("poll", "ubuntu", expected=1)
         self.assertEqual(failed["snapshot_id"], result["snapshot_id"])
         self.assertTrue(failed["error"])
         self.assertNotIn("raw secret", str(failed))
@@ -235,9 +238,9 @@ class CliTests(unittest.TestCase):
 
     def test_changed_feed_rejects_previous_approval(self):
         plan = self.approved()
-        self.debian["example-source"][CVE]["description"] = "Corrected evidence"
-        self.save("debian.json", self.debian)
-        self.invoke("import-feed", "debian", self.debian_path)
+        self.ubuntu["10001-1"]["description"] = "Corrected evidence"
+        self.save("ubuntu.json", self.ubuntu)
+        self.invoke("import-feed", "ubuntu", self.ubuntu_path)
         self.invoke("execute", plan["id"], expected=1)
         self.assertEqual(self.invoke("queue")[0]["status"], "stale")
 
@@ -251,7 +254,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_reloaded_with_protected_loader_at_every_engine_request(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in self.invoke("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         original = Simulator.resolve
         def change_policy(backend, *args):
             target = original(backend, *args)
@@ -268,7 +271,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_backend_cannot_change_under_constructed_backend(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in self.invoke("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         original = Simulator.resolve
         def change_backend(backend, *args):
             target = original(backend, *args)
@@ -331,12 +334,12 @@ class CliTests(unittest.TestCase):
         self.assertFalse(gate.exists())
 
     def native_policy(self):
-        self.write_policy(backend="debian-apt", allowed_origins=self.catalog[0]["origins"],
+        self.write_policy(backend="ubuntu-apt", allowed_origins=self.catalog[0]["origins"],
                           approved_config_digest=self.catalog[0]["config_digest"])
 
     def test_native_investigation_never_constructs_or_observes_backend(self):
         self.native_policy()
-        self.invoke("import-feed", "debian", self.debian_path)
+        self.invoke("import-feed", "ubuntu", self.ubuntu_path)
         imported = self.invoke("inventory", "--import", self.inventory_path)
         self.assertEqual(imported["body"]["collector"], "imported")
         self.invoke("triage", ASSET)
@@ -372,7 +375,7 @@ class CliTests(unittest.TestCase):
         cases = [[], ["queue"], ["--state-dir", str(self.state), "queue"],
                  ["--policy", str(self.policy_path), "queue"], ["unknown\x1b日本語"],
                  self.globals() + ["inventory", "--state-dir", str(self.state)],
-                 self.globals() + ["--backend", "debian-apt", "queue"],
+                 self.globals() + ["--backend", "ubuntu-apt", "queue"],
                  self.globals() + ["--pol", str(self.policy_path), "queue"],
                  self.globals() + ["import-feed", "https://example.invalid", str(self.pwn_path)],
                  self.globals() + ["approve", "a" * 64],
@@ -416,7 +419,7 @@ class CliTests(unittest.TestCase):
 
     def test_input_byte_caps_are_enforced(self):
         cases = [("huge-policy", 1024 * 1024, "policy"), ("huge-pwn", 8 * 1024 * 1024, "pwn"),
-                 ("huge-debian", 128 * 1024 * 1024, "debian"),
+                 ("huge-ubuntu", 512 * 1024 * 1024, "ubuntu"),
                  ("huge-inventory", 64 * 1024 * 1024, "inventory"),
                  ("huge-catalog", 64 * 1024 * 1024, "catalog")]
         for name, cap, kind in cases:
@@ -430,7 +433,7 @@ class CliTests(unittest.TestCase):
                     self.policy_path = path
                     self.invoke("queue", expected=1)
                     self.policy_path = original
-                elif kind in ("pwn", "debian"):
+                elif kind in ("pwn", "ubuntu"):
                     self.invoke("import-feed", kind, path, expected=1)
                 elif kind == "inventory":
                     self.invoke("inventory", "--import", path, expected=1)
@@ -472,13 +475,13 @@ class CliTests(unittest.TestCase):
         demo.run_demo.assert_called_once_with()
 
     def test_native_config_reports_observation_without_state_policy_or_approval(self):
-        report = {"config_digest": "c" * 64, "sources": [{"uri": "http://deb.debian.org/debian/", "suite": "trixie",
-                  "components": ["main"], "key": "/usr/share/keyrings/debian-archive-keyring.pgp",
+        report = {"config_digest": "c" * 64, "sources": [{"uri": "http://archive.ubuntu.com/ubuntu/", "suite": "noble",
+                  "components": ["main"], "key": "/usr/share/keyrings/ubuntu-archive-keyring.gpg",
                   "key_sha256": "e" * 64, "release": "missing" + HOSTILE}], "origins": []}
         native = Mock()
         native.return_value.configuration_report.return_value = report
         observed = native.return_value.configuration_report
-        with patch.object(cli, "DebianApt", native), \
+        with patch.object(cli, "UbuntuApt", native), \
                 patch.object(cli.local_files, "read_bytes", side_effect=AssertionError("policy opened")), \
                 patch.object(cli.local_files, "prepare_database", side_effect=AssertionError("state opened")):
             result = self.invoke("native-config", operational=False)
@@ -492,7 +495,7 @@ class CliTests(unittest.TestCase):
             with self.subTest(args=args):
                 self.invoke(*args, operational=False, expected=2)
         native.return_value.configuration_report.side_effect = cli.core.BackendError("APT probe failed")
-        with patch.object(cli, "DebianApt", native):
+        with patch.object(cli, "UbuntuApt", native):
             self.assertEqual(self.invoke("native-config", operational=False, expected=1)["error"]["code"], "backend_error")
 
     def test_native_root_live_dispatch_uses_protected_loaders_without_real_operations(self):
@@ -515,7 +518,7 @@ class CliTests(unittest.TestCase):
                     patch.object(cli.local_files, "read_bytes", return_value=json.dumps(self.policy).encode()) as read, \
                     patch.object(cli.local_files, "prepare_database", return_value=self.root / "mock.sqlite3") as prepare, \
                     patch.object(cli, "Store"), patch.object(cli, "Engine", side_effect=create_engine), \
-                    patch.object(cli, "DebianApt", return_value=native) as constructor:
+                    patch.object(cli, "UbuntuApt", return_value=native) as constructor:
                 self.assertEqual(self.invoke(*args), result)
                 constructor.assert_called_once_with(live=True)
                 prepare.assert_called_once_with(str(self.state), live=True)
@@ -531,7 +534,7 @@ class CliTests(unittest.TestCase):
         native = Mock(side_effect=AssertionError("native backend constructed"))
         for args, operational in ((["queue"], True), (["native-config"], False), (["inventory"], True)):
             with self.subTest(args=args), patch("autoprotect.cli.os.geteuid", return_value=0), \
-                    patch.object(cli, "DebianApt", native), \
+                    patch.object(cli, "UbuntuApt", native), \
                     patch.object(cli.local_files, "read_bytes", side_effect=AssertionError("policy opened")):
                 result = self.invoke(*args, operational=operational, expected=1)
                 self.assertEqual(result["error"]["code"], "policy_error")
@@ -554,7 +557,7 @@ class CliTests(unittest.TestCase):
         native = Mock()
         native.generation.return_value = "0" * 64
         native.inspect.return_value = copy.deepcopy(self.inventory)
-        with patch.object(cli, "DebianApt", return_value=native) as constructor:
+        with patch.object(cli, "UbuntuApt", return_value=native) as constructor:
             result = self.invoke("inventory")
         constructor.assert_called_once_with(live=False)
         native.inspect.assert_called_once_with()
@@ -596,7 +599,7 @@ class CliTests(unittest.TestCase):
 
     def test_policy_reload_does_not_reuse_file_after_permissions_change(self):
         self.seed()
-        finding = next(row for row in self.invoke("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in self.invoke("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         original = Simulator.resolve
         def change_mode(backend, *args):
             result = original(backend, *args)
@@ -673,7 +676,7 @@ class CliTests(unittest.TestCase):
                 for kind in ("policy", "inventory", "feed"):
                     with self.subTest(name=name, kind=kind):
                         path = native / name
-                        value = {"policy": self.policy, "inventory": self.inventory, "feed": self.debian}[kind]
+                        value = {"policy": self.policy, "inventory": self.inventory, "feed": self.ubuntu}[kind]
                         path.write_text(json.dumps(value), encoding="ascii")
                         path.chmod(0o600)
                         before = path.read_bytes()
@@ -681,7 +684,7 @@ class CliTests(unittest.TestCase):
                         # Valid parent traversal must not defeat collision detection.
                         alias = native / ".." / native.name / name
                         args = {"policy": ("queue",), "inventory": ("inventory", "--import", alias),
-                                "feed": ("import-feed", "debian", alias)}[kind]
+                                "feed": ("import-feed", "ubuntu", alias)}[kind]
                         result = self.invoke(*args, expected=1)
                         self.assertIn("separate", result["error"]["message"])
                         self.assertEqual(path.read_bytes(), before)
@@ -716,13 +719,13 @@ class CliTests(unittest.TestCase):
         for double_state in (True, False):
             for kind in ("inventory", "feed"):
                 with self.subTest(double_state=double_state, kind=kind):
-                    alias.write_text(json.dumps(self.inventory if kind == "inventory" else self.debian))
+                    alias.write_text(json.dumps(self.inventory if kind == "inventory" else self.ubuntu))
                     alias.chmod(0o600)
                     before = alias.read_bytes()
                     self.state = Path("/" + str(state)) if double_state else state
                     input_path = alias if double_state else Path("/" + str(alias))
                     args = ("inventory", "--import", input_path) if kind == "inventory" else (
-                        "import-feed", "debian", input_path)
+                        "import-feed", "ubuntu", input_path)
                     result = self.invoke(*args, expected=1)
                     self.assertIn("separate", result["error"]["message"])
                     self.assertEqual(alias.read_bytes(), before)
@@ -742,14 +745,14 @@ class CliTests(unittest.TestCase):
                     for kind in ("policy", "inventory", "feed"):
                         with self.subTest(double_native=double_native, name=name, kind=kind):
                             path = native / name
-                            value = {"policy": self.policy, "inventory": self.inventory, "feed": self.debian}[kind]
+                            value = {"policy": self.policy, "inventory": self.inventory, "feed": self.ubuntu}[kind]
                             path.write_text(json.dumps(value), encoding="ascii")
                             path.chmod(0o600)
                             before = path.read_bytes()
                             input_path = path if double_native else Path("/" + str(path))
                             self.policy_path = input_path if kind == "policy" else original_policy
                             args = {"policy": ("queue",), "inventory": ("inventory", "--import", input_path),
-                                    "feed": ("import-feed", "debian", input_path)}[kind]
+                                    "feed": ("import-feed", "ubuntu", input_path)}[kind]
                             result = self.invoke(*args, expected=1)
                             self.assertIn("separate", result["error"]["message"])
                             self.assertEqual(path.read_bytes(), before)
@@ -891,9 +894,9 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("Traceback", result.stderr)
             return json.loads(result.stdout or result.stderr)
         command("init-simulator", "--inventory", self.inventory_path, "--catalog", self.catalog_path)
-        command("import-feed", "debian", self.debian_path)
+        command("import-feed", "ubuntu", self.ubuntu_path)
         command("inventory")
-        finding = next(row for row in command("triage", ASSET) if CVE in row["advisory_ids"])
+        finding = next(row for row in command("triage", ASSET) if "USN-10001-1" in row["advisory_ids"])
         plan = command("plan", finding["id"])
         command("execute", plan["id"], expected=1)
         command("approve", plan["id"], "--actor", "subprocess-operator")

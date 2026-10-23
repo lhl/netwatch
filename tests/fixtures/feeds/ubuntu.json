@@ -1,0 +1,68 @@
+{
+  "10001-1": {
+    "id": "USN-10001-1",
+    "is_hidden": "false",
+    "title": "Synthetic example vulnerability",
+    "description": "Synthetic description with control \u001b and command $(never-execute).",
+    "timestamp": 1792713600.0,
+    "cves": ["CVE-2026-10001", "https://launchpad.net/bugs/999999999"],
+    "action": "Never execute this prose or any URL in the feed.",
+    "releases": {
+      "jammy": {"sources": {"example-source": {"version": "1:1.0-1ubuntu0.22.04.9"}}},
+      "noble": {
+        "sources": {"example-source": {"version": "1:1.0-1ubuntu0.24.04.2", "description": "Synthetic source package"}},
+        "allbinaries": {"libexample1": {"pocket": "security", "source": "example-source", "version": "1:1.0-1ubuntu0.24.04.2"}},
+        "binaries": {"libexample1": {"pocket": "security", "version": "1:1.0-1ubuntu0.24.04.2"}},
+        "archs": {"amd64": {"urls": {"https://security.ubuntu.com/ubuntu/pool/main/e/example-source/libexample1_1.0_amd64.deb": {"md5": "00000000000000000000000000000000", "size": 1234}}}}
+      }
+    }
+  },
+  "10002-1": {
+    "id": "10002-1",
+    "description": "A historical fix already installed; not universal safety.",
+    "cves": ["CVE-2026-10002"],
+    "releases": {"noble": {
+      "sources": {"example-source": {"version": "1:0.9-1ubuntu0.24.04.1"}},
+      "allbinaries": {"libexample1": {"source": "example-source", "pocket": "security", "version": "1:0.9-1ubuntu0.24.04.1"}}
+    }}
+  },
+  "10003-1": {
+    "id": "10003-1",
+    "description": "Missing source version is unknown, not an unfixed vulnerability claim.",
+    "cves": ["CVE-2026-10003"],
+    "releases": {"noble": {
+      "sources": {"example-source": {}},
+      "allbinaries": {"libexample1": {"source": "example-source", "pocket": "security", "version": "1:1.0-1ubuntu0.24.04.3"}}
+    }}
+  },
+  "10004-1": {
+    "id": "10004-1",
+    "description": "Ubuntu Pro ESM update is outside remediation scope.",
+    "cves": ["CVE-2026-10004"],
+    "releases": {"noble": {
+      "sources": {"example-source": {"version": "1:1.0-1ubuntu0.24.04.1+esm1"}},
+      "allbinaries": {"libexample1": {"source": "example-source", "pocket": "esm-apps", "version": "1:1.0-1ubuntu0.24.04.1+esm1"}}
+    }}
+  },
+  "10005-1": {
+    "id": "10005-1",
+    "description": "A fix for another release is not Noble evidence.",
+    "cves": ["CVE-2026-10005"],
+    "releases": {"jammy": {"sources": {"example-source": {"version": "9.0-1ubuntu1"}}}}
+  },
+  "10006-1": {
+    "id": "10006-1",
+    "description": "A source without binary pocket evidence cannot authorize remediation.",
+    "cves": [],
+    "releases": {"noble": {"sources": {"example-source": {"version": "2.0-1ubuntu1"}}}}
+  },
+  "10007-1": {
+    "id": "10007-1",
+    "description": "The same CVE can appear in a notice for another source.",
+    "cves": ["CVE-2026-10001"],
+    "releases": {"noble": {
+      "sources": {"another-source": {"version": "1.0-1ubuntu1"}},
+      "allbinaries": {"another-binary": {"source": "another-source", "pocket": "security", "version": "1.0-1ubuntu1"}}
+    }}
+  }
+}

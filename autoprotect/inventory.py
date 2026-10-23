@@ -38,13 +38,13 @@ def normalize_inventory(data: Any, collector: str = "imported") -> dict:
     """Return independent, sorted inventory data, never trust the body's collector.
 
     Only trusted internal callers select ``native`` or ``simulator``. Import
-    entrypoints must use the default. ``deb`` uses the shared strict Debian name
-    and version validators: malformed versions reject the entire import, rather
-    than dropping a package. Other ecosystems retain printable ASCII identities
-    and versions for unknown matching. Debian source fields must be explicit;
-    supply source metadata rather than guessing through a binary-only rebuild.
-    Other ecosystems fall back to binary identity for absent source fields.
-    Explicit null/empty values are rejected. No lineage is inferred.
+    entrypoints must use the default. ``deb`` uses the shared strict package-name
+    and dpkg version validators: malformed versions reject the entire import,
+    rather than dropping a package. Other ecosystems retain printable ASCII
+    identities and versions for unknown matching, and fall back to binary
+    identity for absent source fields. Source fields for ``deb`` must be
+    explicit; supply source metadata rather than guessing through a binary-only
+    rebuild. Explicit null/empty values are rejected. No lineage is inferred.
 
     ``complete`` describes collection coverage, not package readiness. Held and
     non-installed states remain visible. Unknown fields are not authority and
@@ -75,7 +75,7 @@ def normalize_inventory(data: Any, collector: str = "imported") -> dict:
             raise ValidationError("each package must be an object")
         ecosystem = identifier(package.get("ecosystem"), "ecosystem")
         if ecosystem == "deb" and ("source_name" not in package or "source_version" not in package):
-            raise ValidationError("Debian packages require source_name and source_version; supply source metadata")
+            raise ValidationError("deb packages require source_name and source_version; supply source metadata")
         name_validator = package_name if ecosystem == "deb" else _opaque_identity
         version_validator = version if ecosystem == "deb" else _opaque_identity
         name = name_validator(package.get("name"), "package name")

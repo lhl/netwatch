@@ -10,14 +10,14 @@ import sqlite3
 import sys
 
 from . import __version__, core, local_files
-from .backends import DebianApt, Simulator, _NATIVE_STATE
+from .backends import UbuntuApt, Simulator, _NATIVE_STATE
 from .engine import Engine, validate_policy
 from .store import Store
 
 
 _POLICY_BYTES = 1024 * 1024
 _DATA_BYTES = 64 * 1024 * 1024
-_FEED_BYTES = {"pwn": 8 * 1024 * 1024, "debian": 128 * 1024 * 1024}
+_FEED_BYTES = {"pwn": 8 * 1024 * 1024, "ubuntu": 512 * 1024 * 1024}
 _LIVE_COMMANDS = {"execute", "recovery-status", "recover", "resolve-recovery"}
 _STATE_NAMES = ("state.sqlite3", "state.sqlite3-journal", "state.sqlite3-wal", "state.sqlite3-shm",
                 "simulator.json", "simulator.json.lock", "simulator.json.gate", "simulator.json.generation")
@@ -87,10 +87,10 @@ def _parser():
     setup.add_argument("--inventory", required=True, metavar="FILE")
     setup.add_argument("--catalog", required=True, metavar="FILE")
     ingest = commands.add_parser("import-feed", help="import untrusted feed data without HTTPS provenance")
-    ingest.add_argument("source", choices=("pwn", "debian"), metavar="SOURCE")
+    ingest.add_argument("source", choices=("pwn", "ubuntu"), metavar="SOURCE")
     ingest.add_argument("file", metavar="FILE")
     poll = commands.add_parser("poll", help="fetch one fixed HTTPS source; failure retains last good data")
-    poll.add_argument("source", choices=("pwn", "debian"), metavar="SOURCE")
+    poll.add_argument("source", choices=("pwn", "ubuntu"), metavar="SOURCE")
     inventory = commands.add_parser("inventory", help="collect selected-backend inventory or import untrusted data")
     inventory.add_argument("--import", dest="import_file", metavar="FILE")
     for name, help_text in (("triage", "match supported advisories and report unknown coverage"),
@@ -146,7 +146,7 @@ class _DeferredBackend:
 
     def __getattr__(self, name):
         if self._backend is None:
-            self._backend = Simulator(self._path) if self.name == "simulator" else DebianApt(live=self._live)
+            self._backend = Simulator(self._path) if self.name == "simulator" else UbuntuApt(live=self._live)
         return getattr(self._backend, name)
 
 
@@ -234,7 +234,7 @@ def _operate(args):
     policy = provider()
     if policy["backend"] == "simulator" and args.live:
         raise core.PolicyError("--live is not permitted for the simulator")
-    if policy["backend"] == "debian-apt" and args.command in _LIVE_COMMANDS and not args.live:
+    if policy["backend"] == "ubuntu-apt" and args.command in _LIVE_COMMANDS and not args.live:
         raise core.PolicyError("Native execution and recovery locks require explicit --live and effective root")
     if args.command == "init-simulator" and policy["backend"] != "simulator":
         raise core.PolicyError("init-simulator requires a simulator policy")
@@ -262,7 +262,7 @@ def _native_config():
     approval: nothing here writes policy or state, and copying a digest that
     was not reviewed would defeat the configuration binding.
     """
-    report = DebianApt().configuration_report()
+    report = UbuntuApt().configuration_report()
     return {"kind": "native-configuration-observation", "approved": False,
             "warning": ("Observation only. Review every source, key file digest and origin independently before "
                         "copying config_digest into approved_config_digest or origins into allowed_origins."),

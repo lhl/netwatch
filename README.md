@@ -2,12 +2,12 @@
 
 Autoprotect is a local security-advisory triage and remediation proof of concept. It polls fixed advisory sources, compares them with package inventory, creates immutable remediation plans, and executes them under manual approval or explicit automatic policy.
 
-**Start with the offline simulator.** The native backend is implemented for one-package updates on Debian 13 (`trixie`), `amd64`, but real APT downloads, native package-lock handoff and privileged installation have not been tested. This is not a production-ready unattended patch service.
+**Start with the offline simulator.** The native target is Ubuntu 24.04 LTS (`noble`), `amd64`, with one-package updates from approved standard Ubuntu archives. Ubuntu Pro and Expanded Security Maintenance (ESM) are excluded from remediation. Independent review and final native-regression verification are in progress; no privileged Ubuntu qualification has been performed. This is not a production-ready unattended patch service.
 
 ## What it does
 
-- Imports or polls pwn.watch incident discovery and Debian Security Tracker assertions. Incident prose and reported fixed versions cannot select installation commands.
-- Matches Debian **source-package versions**, including distribution backports. Unsupported ecosystems, incomplete evidence and unmatched packages remain `unknown`, not implicitly safe.
+- Uses pwn.watch for incident discovery and Canonical's Ubuntu Security Notice (USN) database for published-update evidence. See the [Ubuntu source contract](docs/research/UBUNTU.md). Incident prose and reported fixed versions cannot select installation commands.
+- Compares Ubuntu **source-package versions**, including distribution backports, only when the notice explicitly covers the binary through Noble's standard `security` pocket. This is missing-update detection, not complete CVE coverage. Unsupported ecosystems, incomplete evidence, unlisted binaries and packages without notices remain `unknown`, not implicitly safe.
 - Stores source health, inventories, findings, plans, approvals, outcomes and audit events in SQLite.
 - Supports `observe`, `manual` and `auto` policies. Execution rechecks policy, evidence, inventory, exact repository artifacts and expiry; automatic mode does not bypass those checks.
 - Verifies the complete expected package-state change, retains a target-wide gate after uncertain execution, and requires explicit recovery followed by fresh collection and a new plan.
@@ -23,7 +23,7 @@ Use Linux and **Python 3.12 or newer** from the repository root. The package has
 python3 -B -m autoprotect demo
 ```
 
-The demo runs **101 ordinary commands** against generated private simulator state, then removes that state. Its JSON summary verifies:
+The demo runs **101 ordinary commands** against generated private simulator state, then removes that state. Both module and installed-console runs passed. Its JSON summary covers:
 
 | Scenario | Expected result |
 | --- | --- |
@@ -35,11 +35,11 @@ The demo runs **101 ordinary commands** against generated private simulator stat
 
 Denial checks require the expected error reason and, where emitted, a newly appended matching audit event. A generic I/O error cannot stand in for a policy denial. `-B` disables cache writes by the invoking interpreter; demo children also use `-B`. Normal completion and Python unwinding remove temporary state; forced process or host death can leave scratch files.
 
-For individual commands, follow the tested [manual and automatic simulator walkthrough](examples/README.md). It demonstrates setup, import, inventory, triage, planning, approval, execution, audit and advisory export using the files in `examples/`.
+For individual commands, follow the verified [manual and automatic simulator walkthrough](examples/README.md). Both procedures passed with verified execution and the expected USN `not_affected` result. They cover setup, import, inventory, triage, planning, approval, execution, audit and advisory export.
 
 ## Install locally
 
-The application requires Python `>=3.12` (Debian 13 ships 3.13). Building from source requires **setuptools 83.0.0**; virtual-environment creation requires Python's `venv` and `ensurepip` support. Native system prerequisites are separate from these Python dependencies.
+The application requires Python `>=3.12`. Building from source requires **setuptools 83.0.0**; virtual-environment creation requires Python's `venv` and `ensurepip` support. Native system prerequisites are separate from these Python dependencies.
 
 With that build backend already available in your Python environment, build and install without consulting a package index:
 
@@ -65,6 +65,8 @@ This check copies runtime sources to a temporary directory, builds a wheel and s
 
 Operational commands require a private policy file and an explicit state directory. Put global options **before** the command. The policy selects the backend; no command-line option can replace it. Use `init-simulator` first for new simulator state, as shown in the walkthrough.
 
+This candidate requires SQLite schema 4. Earlier schemas are rejected, not migrated or reinterpreted. Preserve prior databases and use a separate fresh state directory with new acquisition, inventory, plans and approvals. A new database does not bypass a retained native target gate.
+
 For reference, define `STATE` and `POLICY` as your existing private state directory and policy file, and `ASSET_ID`, `FINDING_ID`, and `PLAN_ID` from the preceding JSON results. These commands do not add `--live`:
 
 ```bash
@@ -84,14 +86,18 @@ Feed commands use the same global options:
 
 ```bash
 # Offline: explicit import, never authenticated acquisition provenance.
-python3 -B -m autoprotect --state-dir "$STATE" --policy "$POLICY" import-feed debian examples/debian-synthetic.json
+python3 -B -m autoprotect --state-dir "$STATE" --policy "$POLICY" import-feed ubuntu examples/ubuntu-synthetic.json
 
-# Network-dependent: one request to each fixed HTTPS endpoint.
+# Network-dependent: fixed-source acquisition.
 python3 -B -m autoprotect --state-dir "$STATE" --policy "$POLICY" poll pwn
-python3 -B -m autoprotect --state-dir "$STATE" --policy "$POLICY" poll debian
+python3 -B -m autoprotect --state-dir "$STATE" --policy "$POLICY" poll ubuntu
 ```
 
-`pwn` uses `https://pwn.watch/incidents.json`; `debian` uses `https://security-tracker.debian.org/tracker/data/json`. Polling failures preserve last-good data and expose source errors. A successful poll does **not** trigger triage or execution; an external scheduler must invoke the required workflow. The final CLI polling path was tested with injected transport results, not live network requests. Earlier dated source retrievals are recorded separately in the research.
+`pwn` uses `https://pwn.watch/incidents.json`; `ubuntu` uses `https://usn.ubuntu.com/usn-db/database.json`. The Ubuntu fetch/import/parser limit is **512 MiB**, with whole-document decoding that requires additional memory. The walkthrough uses `examples/ubuntu-synthetic.json`; parser edge cases use `tests/fixtures/feeds/ubuntu.json`. Dated retrieval evidence and the schema are recorded in [UBUNTU.md](docs/research/UBUNTU.md); command and test evidence is in [REVIEW.md](docs/REVIEW.md).
+
+Findings and plans bind USN IDs. Notice-level CVE references correlate incidents; they do not establish that each CVE affects every package in a notice. `affected` means the installed source version is below a supported notice's fix; `not_affected` means it meets that notice's update requirement, not that the package is free of vulnerabilities. Pro/ESM, realtime, FIPS, missing or mixed pocket evidence and ESM-labelled installed versions remain outside supported assessment.
+
+Polling failures preserve last-good data and expose source errors. A successful poll does **not** trigger triage or execution; an external scheduler must invoke the required workflow.
 
 Do not mix synthetic inputs with a native deployment. Importing a feed after polling changes its current acquisition provenance back to `import`; it cannot authorize native execution.
 
@@ -103,9 +109,9 @@ A recovery command can complete with exit `0` while the original plan remains `n
 
 ## Native execution boundary
 
-Native mutation and recovery-lock commands require explicit `--live`, effective root, protected root-owned policy/state, fresh native inventory, HTTPS-acquired Debian assertions, exact package/asset/repository allowlists and a reviewed APT configuration fingerprint. `autoprotect native-config` prints the host's configuration digest, sources, key-file digests and signed origins as read-only input to that review; it approves nothing. Policies must explicitly acknowledge maintainer scripts, recovery preparation and trusted installed lineage. These are administrator assertions, not verified backups or authentication of installed bytes.
+Native mutation and recovery-lock commands require explicit `--live`, effective root, protected root-owned policy/state, fresh native inventory, HTTPS-acquired Ubuntu assertions, exact package/asset/repository allowlists and a reviewed APT configuration fingerprint. `autoprotect native-config` prints the host's configuration digest, sources, key-file digests and signed origins as read-only input to that review; it approves nothing. Policies must explicitly acknowledge maintainer scripts, recovery preparation and trusted installed lineage. These are administrator assertions, not verified backups or authentication of installed bytes.
 
-Only a single-package, increasing-version transaction with no extra package changes is supported. Sensitive packages, unsupported repositories, dependency changes, holds and uncertain package states are rejected. Do not loosen these checks to make an unsupported update execute. See [native prerequisites and rollout gates](docs/OPERATIONS.md) before considering a separately authorized disposable-Debian exercise.
+Only a single-package, increasing-version transaction with no extra package changes is supported. Sensitive packages, unsupported repositories, dependency changes, holds and uncertain package states are rejected. Do not loosen these checks to make an unsupported update execute. See [native prerequisites and rollout gates](docs/OPERATIONS.md) before considering a separately authorized disposable Ubuntu exercise. Pro/ESM repositories and fixes requiring those channels remain outside the supported remediation path, regardless of local entitlement.
 
 Package-state verification is **not** service health, kernel activation, rollback, absence of compromise or complete vulnerability coverage. Feeds and exported text remain untrusted. Local content hashes and audit rows do not protect against the trusted database owner or root.
 
@@ -120,6 +126,8 @@ python3 scripts/worklog.py render
 git diff --check
 ```
 
-The integrated candidate passes **452 offline tests** with no skips, including fake-native execution, actual simulator processes, recovery, hostile inputs and failure paths. Synthetic signature tests use local GnuPG tools when available; they are not live Debian repository tests. Check details and review disposition are in [REVIEW.md](docs/REVIEW.md).
+The Ubuntu candidate passed **507 offline tests in 25.515 seconds**, including native freshness regressions and shared feed-budget checks. Module and installed-console 101-command demos, wheel/source builds, both documented simulator workflows and 1,028 native dpkg comparison cases also passed. [REVIEW.md](docs/REVIEW.md) records scope, review status and the pinned Ubuntu image. These are simulation and comparison results, not privileged Ubuntu execution qualification.
 
-Read [DESIGN.md](docs/DESIGN.md) for implemented contracts and separately marked production work, [DELIVERY.md](docs/DELIVERY.md) for acceptance status, and [AGENTS.md](AGENTS.md) for development rules. Development history is stored in immutable [worklog entries](worklog/README.md), not in the product instructions. No live deployment or privileged host update was performed for this delivery.
+Synthetic signature tests use local GnuPG tools when available; they are not privileged Ubuntu repository/install qualification. Historical validation remains in the worklog and does not qualify a changed candidate.
+
+Read [DESIGN.md](docs/DESIGN.md) for implemented contracts and separately marked production work, [DELIVERY.md](docs/DELIVERY.md) for acceptance status, and [AGENTS.md](AGENTS.md) for development rules. Development history is stored in immutable [worklog entries](worklog/README.md), not in the product instructions. No live Ubuntu deployment or privileged Ubuntu host update is claimed.

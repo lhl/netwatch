@@ -16,8 +16,8 @@ def example_inventory():
         "schema_version": 1,
         "asset_id": "synthetic-host",
         "observed_at": 1_790_000_000,
-        "os": "debian",
-        "release": "trixie",
+        "os": "ubuntu",
+        "release": "noble",
         "architecture": "amd64",
         "collector": "native",
         "complete": True,
@@ -69,7 +69,7 @@ class NormalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValidationError, "duplicate"):
             normalize_inventory(data)
 
-    def test_source_mapping_and_missing_debian_metadata_rejected(self):
+    def test_source_mapping_and_missing_deb_metadata_rejected(self):
         result = normalize_inventory(example_inventory())
         package = result["packages"][0]
         self.assertEqual(package["version"], "2:1.0-1+b2")
@@ -186,7 +186,7 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(len(before), 64)
         self.assertEqual(before, inventory_fingerprint({**data, "observed_at": data["observed_at"] + 1}))
         for field, value in (("asset_id", "other"), ("collector", "imported"), ("complete", False),
-                             ("os", "ubuntu"), ("release", "bookworm"), ("architecture", "arm64"),
+                             ("os", "linux"), ("release", "jammy"), ("architecture", "arm64"),
                              ("schema_version", 2), ("extra", True)):
             with self.subTest(field=field):
                 self.assertNotEqual(before, inventory_fingerprint({**data, field: value}))
@@ -228,7 +228,7 @@ class NativeCollectionTests(unittest.TestCase):
     def setUp(self):
         self.machine = b"0123456789abcdef0123456789abcdef\n"
         self.files = {
-            "/etc/os-release": b'ID=debian\nVERSION_ID="13"\nVERSION_CODENAME=trixie\nPRETTY_NAME="Synthetic Debian"\n',
+            "/etc/os-release": b'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_CODENAME=noble\nPRETTY_NAME="Synthetic Ubuntu"\n',
             "/etc/machine-id": self.machine,
         }
         self.reads = []
@@ -251,7 +251,7 @@ class NativeCollectionTests(unittest.TestCase):
         self.assertEqual(result["observed_at"], 1_790_000_123)
         self.assertEqual(result["asset_id"], "machine-" + hashlib.sha256(self.machine.strip()).hexdigest())
         self.assertNotIn(self.machine.strip().decode(), str(result))
-        self.assertEqual((result["os"], result["release"], result["architecture"]), ("debian", "trixie", "amd64"))
+        self.assertEqual((result["os"], result["release"], result["architecture"]), ("ubuntu", "noble", "amd64"))
         packages = {p["name"]: p for p in result["packages"]}
         self.assertTrue(all(p["ecosystem"] == "deb" for p in packages.values()))
         self.assertEqual(packages["libexample1"]["source_name"], "example")
@@ -284,17 +284,17 @@ class NativeCollectionTests(unittest.TestCase):
         self.assertEqual(len(fake.calls), 3)
 
     def test_os_release_fallback_does_not_merge_sources(self):
-        self.files["/usr/lib/os-release"] = b"ID=ubuntu\nVERSION_CODENAME=noble\n"
-        self.assertEqual(self.collect()["os"], "debian")
+        self.files["/usr/lib/os-release"] = b"ID=example\nVERSION_CODENAME=other\n"
+        self.assertEqual(self.collect()["os"], "ubuntu")
         self.assertNotIn("/usr/lib/os-release", [path for path, _ in self.reads])
         del self.files["/etc/os-release"]
         result = self.collect()
-        self.assertEqual((result["os"], result["release"]), ("ubuntu", "noble"))
+        self.assertEqual((result["os"], result["release"]), ("example", "other"))
 
-    def test_id_like_never_establishes_debian_identity(self):
-        self.files["/etc/os-release"] = b"ID=custom\nID_LIKE=debian\nVERSION_ID=22.04\n"
+    def test_id_like_never_establishes_platform_identity(self):
+        self.files["/etc/os-release"] = b"ID=custom\nID_LIKE=ubuntu\nVERSION_ID=24.04\n"
         result = self.collect()
-        self.assertEqual((result["os"], result["release"]), ("custom", "22.04"))
+        self.assertEqual((result["os"], result["release"]), ("custom", "24.04"))
 
     def test_os_release_is_data_not_shell_code(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -303,11 +303,11 @@ class NativeCollectionTests(unittest.TestCase):
                 f'NAME="$(touch {marker})"\nEXTRA="`touch {marker}`"\n'
                 'ESCAPES="a\\\"b\\\\c\\$HOME\\`literal\\`"\nSINGLE=\'literal $HOME\'\n'
             ).encode()
-            self.assertEqual(self.collect()["os"], "debian")
+            self.assertEqual(self.collect()["os"], "ubuntu")
             self.assertFalse(marker.exists())
-        for value in (b"ID=debian;touch /bad\n", b"ID=$(id)\n", b"ID='debian'\"other\"\n",
-                      b"ID=debian\nID=ubuntu\n", b"ID=debian\x00\n", b"ID=debian\r\n",
-                      b"ID=debian\nNAME=\"unclosed\n", b"ID=\xff\n", b"ID=debian\n. /bad\n"):
+        for value in (b"ID=ubuntu;touch /bad\n", b"ID=$(id)\n", b"ID='ubuntu'\"other\"\n",
+                      b"ID=ubuntu\nID=linux\n", b"ID=ubuntu\x00\n", b"ID=ubuntu\r\n",
+                      b"ID=ubuntu\nNAME=\"unclosed\n", b"ID=\xff\n", b"ID=ubuntu\n. /bad\n"):
             self.files["/etc/os-release"] = value
             with self.subTest(value=value), self.assertRaises(BackendError):
                 self.collect()

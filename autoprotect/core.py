@@ -74,25 +74,25 @@ def identifier(value: Any, field: str = "identifier") -> str:
 def package_name(value: Any, field: str = "package name") -> str:
     value = text(value, field, max_length=128)
     if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]+", value, flags=re.ASCII):
-        raise ValidationError(f"{field} must be a Debian package name without architecture")
+        raise ValidationError(f"{field} must be a dpkg package name without architecture")
     return value
 
 
 def version(value: Any, field: str = "version") -> str:
-    """Validate the supported Debian version syntax; never compare it lexically."""
+    """Validate the supported dpkg version syntax; never compare it lexically."""
     value = text(value, field, max_length=256)
     body = value
     if ":" in value:
         epoch, body = value.split(":", 1)
         if not re.fullmatch(r"[0-9]+", epoch, flags=re.ASCII) or int(epoch) > 2**31 - 1:
-            raise ValidationError(f"{field} has an invalid or out-of-range Debian epoch")
+            raise ValidationError(f"{field} has an invalid or out-of-range dpkg epoch")
     upstream, separator, revision = body.rpartition("-")
     if not separator:
         upstream = body
     elif not re.fullmatch(r"[A-Za-z0-9+.~]+", revision, flags=re.ASCII):
-        raise ValidationError(f"{field} has an unsupported Debian revision")
+        raise ValidationError(f"{field} has an unsupported dpkg revision")
     if not re.fullmatch(r"[0-9][A-Za-z0-9.+:~\-]*", upstream, flags=re.ASCII):
-        raise ValidationError(f"{field} has unsupported Debian version syntax")
+        raise ValidationError(f"{field} has unsupported dpkg version syntax")
     return value
 
 
