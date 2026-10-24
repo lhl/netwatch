@@ -45,6 +45,14 @@ Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv
 - [x] Record matching-rule changes as reassessment, preserve old scans, and avoid duplicate finding events on unchanged checks.
 - [x] Pass 56 tests, module/installed demos, packaging and synthetic native-version comparisons. Rerun the authorized local check without applying updates; keep private inventory outside Git.
 
+## Terminal output and operating manual
+
+- [x] Add Rich terminal styling with text labels for affected/review/update status; preserve plain pipes, `NO_COLOR`, dumb-terminal and JSON output.
+- [x] Show source severity separately from applicability and label updates that overlap findings without claiming they fix them.
+- [x] Pin runtime dependencies with hashes; verify dependency installation and include the lock in source distributions.
+- [x] Link the operating manual from AGENTS and make it cover installation, registration, checks, queries, updates and recovery.
+- [x] Pass 61 tests, package/dependency checks and a cached local pseudo-terminal check. No new inventory or update operations.
+
 ## Before using live updates
 
 Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.

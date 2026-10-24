@@ -2,6 +2,9 @@
 import argparse
 import json
 import os
+import sys
+from rich.console import Console
+from rich.text import Text
 from datetime import datetime, timezone
 from collections import defaultdict
 import sqlite3
@@ -93,28 +96,40 @@ def dispatch(args, store, runner, request):
 
 
 def display(result, json_output=False, show_all=False):
+    # Never emit terminal control sequences to pipes or machine-readable output.
+    color = not json_output and sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
+    console = Console(file=sys.stdout, force_terminal=True, highlight=False, markup=False) if color else None
+    def emit(value="", style=None):
+        if console:
+            console.print(Text(value, style=style or ""))
+        else:
+            print(value)
     if json_output or not (isinstance(result, list) and result and "report" in result[0]):
-        print(json.dumps(result, ensure_ascii=True, indent=None if json_output else 2))
+        encoded = json.dumps(result, ensure_ascii=True, indent=None if json_output else 2)
+        if console:
+            console.print_json(json=encoded)
+        else:
+            print(encoded)
         return
     safe = lambda value: json.dumps(str(value), ensure_ascii=True)[1:-1]
     date = lambda at: datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if at is not None else "unknown"
     for item in result:
         t, report = item["target"], item["report"]
-        print(f"{safe(t['name'])} ({safe(t['kind'])} on {safe(t['host'])})")
+        emit(f"{safe(t['name'])} ({safe(t['kind'])} on {safe(t['host'])})", "bold cyan")
         if item.get("error"):
-            print("  Error: " + safe(item["error"]))
+            emit("  Error: " + safe(item["error"]), "bold red")
         if (item.get("last_attempt") or {}).get("kind") == "collection_failed":
-            print("  Collection failed; showing the previous report.")
+            emit("  Collection failed; showing the previous report.", "bold red")
         if not report:
-            print("  No inventory collected. Run netwatch check " + safe(t["name"]))
+            emit("  No inventory collected. Run netwatch check " + safe(t["name"]), "yellow")
             continue
-        print(f"  Checked {date(report['at'])} | {len(report['packages'])} installed packages | {len(report['updates'])} available updates")
+        emit(f"  Checked {date(report['at'])} | {len(report['packages'])} installed packages | {len(report['updates'])} available updates", "dim")
         if not report["advisory_check_ok"]:
-            print("  Advisory check incomplete; retained results need review.")
+            emit("  Advisory check incomplete; retained results need review.", "bold yellow")
         if report["update_error"]:
-            print(f"  Update check: {safe(report['update_error'])}; last observed {date(report.get('updates_observed_at'))}")
+            emit(f"  Update check: {safe(report['update_error'])}; last observed {date(report.get('updates_observed_at'))}", "yellow")
         for plan in item["pending_updates"]:
-            print(f"  Update plan {plan['id']}: {safe(plan['status'])}")
+            emit(f"  Update plan {plan['id']}: {safe(plan['status'])}", "yellow")
         updates = {u["package"]: u for u in report["updates"]}
         shortened = False
         for state, label in (("affected", "Affected"), ("unknown", "Needs review")):
@@ -122,38 +137,44 @@ def display(result, json_output=False, show_all=False):
             for row in report["findings"]:
                 if row["state"] == state:
                     groups[(row["package"], row["installed"])].append(row)
-            print(f"\n{label}: {len(groups)} packages ({sum(map(len, groups.values()))} notices)")
+            style = ("bold red" if state == "affected" else "bold yellow") if groups else "bold"
+            emit(f"\n{label}: {len(groups)} packages ({sum(map(len, groups.values()))} notices)", style)
             if groups and all(not r["fix_versions"] for rows in groups.values() for r in rows):
-                print("  These notices have no published fix version; check applicability before taking action.")
+                emit("  These notices have no published fix version; check applicability before taking action.", "dim")
             ordered = sorted(groups, key=lambda key: (key[0] not in updates, key))
             for key in ordered if show_all else ordered[:5]:
                 rows = groups[key]
                 ids = sorted({r["advisory"] for r in rows})
                 fixes = sorted({v for r in rows for v in r["fix_versions"]})
                 count = len(rows)
-                print(f"  {safe(key[0])} {safe(key[1])}: {count} {'notice' if count == 1 else 'notices'}")
-                print("    " + safe(", ".join(ids if show_all else ids[:3])) + (" ..." if not show_all and len(ids) > 3 else ""))
-                print("    Reported fixes: " + safe(", ".join(fixes if show_all else fixes[:3]) or "none listed"))
+                severities = sorted({r["severity"] for r in rows if isinstance(r.get("severity"), str) and r["severity"].lower() in ("critical", "high", "medium", "low")})
+                severity = " | reported severity: " + ", ".join(severities) if severities else ""
+                emit(f"  {safe(key[0])} {safe(key[1])}: {count} {'notice' if count == 1 else 'notices'}{safe(severity)}", "bold")
+                emit("    " + safe(", ".join(ids if show_all else ids[:3])) + (" ..." if not show_all and len(ids) > 3 else ""), "dim")
+                emit("    Reported fixes: " + safe(", ".join(fixes if show_all else fixes[:3]) or "none listed"))
                 shortened |= not show_all and (len(ids) > 3 or len(fixes) > 3)
             shortened |= not show_all and len(ordered) > 5
         omitted = sum(e.get("matching", {}).get("fixed_notices_omitted", 0) for e in report.get("evidence", []))
         if omitted:
-            print(f"\n{omitted} historical notices omitted: installed versions meet the tracker fixes.")
+            emit(f"\n{omitted} historical notices omitted: installed versions meet the tracker fixes.", "dim")
         if updates:
-            print("\nAvailable updates:")
+            emit("\nAvailable updates:", "bold cyan")
+            emit("  Repository candidates; not all are security fixes.", "dim")
             versions = defaultdict(set)
             for p in report["packages"]:
                 versions[p["name"]].add(p["version"])
             affected = {r["package"] for r in report["findings"] if r["state"] == "affected"}
-            ordered = sorted(updates, key=lambda n: (n not in affected, n))
+            review = {r["package"] for r in report["findings"] if r["state"] == "unknown"}
+            ordered = sorted(updates, key=lambda n: (n not in affected, n not in review, n))
             for n in ordered if show_all else ordered[:10]:
-                print(f"  {safe(n)}: {safe(', '.join(sorted(versions[n])) or '?')} -> {safe(updates[n].get('candidate') or 'unknown')}")
+                label, style = (" [affected]", "bold red") if n in affected else ((" [review]", "yellow") if n in review else ("", "cyan"))
+                emit(f"  {safe(n)}: {safe(', '.join(sorted(versions[n])) or '?')} -> {safe(updates[n].get('candidate') or 'unknown')}{label}", style)
             shortened |= not show_all and len(ordered) > 10
         for warning in report["warnings"]:
-            print("\n" + safe(warning))
+            emit("\n" + safe(warning), "yellow")
         if shortened:
-            print(f"\nAll rows: netwatch status {safe(t['name'])} --all")
-        print(f"Full records: netwatch --json status {safe(t['name'])}\n")
+            emit(f"\nAll rows: netwatch status {safe(t['name'])} --all", "dim")
+        emit(f"Full records: netwatch --json status {safe(t['name'])}\n", "dim")
 
 
 def main(argv=None, *, runner=adapters.run, request=sources.fetch):

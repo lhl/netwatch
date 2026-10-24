@@ -1,6 +1,53 @@
 # Usage guide
 
-[Install and quick start](../README.md#quick-start)
+## Install and try
+
+Requires Python 3.12+ and Git. Install into a virtual environment:
+
+```bash
+git clone https://github.com/lhl/netwatch.git
+cd netwatch
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install --require-hashes -r requirements.lock
+python3 -m pip install .
+netwatch demo
+```
+
+The demo uses synthetic data and a simulated package manager. From a checkout, `python3 -m netwatch` runs the same CLI as `netwatch`.
+
+## Daily workflow
+
+Replace the example SSH alias with your target. Registration saves a name; `check` collects installed versions, advisory evidence and available updates.
+
+```bash
+netwatch add server ubuntu --host my-server
+netwatch check server
+netwatch status server
+netwatch list
+```
+
+Use `--path /absolute/project/path` for a project or conda prefix. Omit `--host` for local use. `check` without a name checks all registrations; `status` without a name shows their cached reports.
+
+For an update, review the commands and environment-wide scope returned by `preview`, then substitute its ID for `PLAN_ID`:
+
+```bash
+netwatch preview server
+netwatch apply PLAN_ID --yes
+netwatch status server
+```
+
+OS updates require `sudo -n` access. Application updates use the invoking account. `apply` updates the whole selected environment, including dependencies. Live updates have not been tested; start on a disposable target. See [update behavior and recovery](#updates).
+
+## Agent and script queries
+
+```bash
+netwatch --json list
+netwatch --json status server
+netwatch --json history --since 0
+```
+
+Global flags (`--json`, `--db`) go before the command. Status returns the saved report, last collection attempt and pending update plans. History returns events and `next_cursor`; pass that value as `--since` on the next request. These queries do not contact targets. Keep agent permissions read-only and use an operator account to apply updates.
 
 ## Environments
 
@@ -49,7 +96,9 @@ netwatch status server --all   # expand every row
 netwatch --json status server  # complete records, including evidence and inventory
 ```
 
-The summary includes observation times, failed checks and the count of historical notices filtered out. Packages with available updates appear first in finding groups; affected packages appear first in the update list.
+Color terminals show affected findings in red, review findings in yellow and ordinary updates in cyan. Updates marked `[affected]` or `[review]` have an associated finding; the marker does not establish that the candidate fixes it. Source-reported severity is shown separately where available. Pipes and redirected files use plain text. Set `NO_COLOR=1` to disable styling; `--json` always emits plain JSON.
+
+The summary includes observation times, failed checks and the count of historical notices filtered out. Packages with available updates appear first in finding groups; updates for affected packages appear first, followed by review matches and other updates.
 
 ## History
 

@@ -2,11 +2,17 @@
 
 netwatch is a small Python/SQLite CLI for maintained environments, cached advisory checks, agent-readable status and human-approved package-manager updates. Prefer fewer functions and files over frameworks. User instructions override this guide. Do not use subagents unless the user explicitly changes that direction.
 
+## Using netwatch
+
+Read [docs/USAGE.md](docs/USAGE.md) for installation, environment registration, checks, status/history queries, update approval and recovery. It is the operating manual for users and agents. [README.md](README.md) gives the quick start; [docs/DESIGN.md](docs/DESIGN.md) describes the modules.
+
+Start with `netwatch list` and `netwatch status` to inspect saved state without contacting targets. Use `netwatch --json status` and `netwatch --json history --since 0` for structured results. Run `check` only for authorized targets, and `apply` only after explicit update approval. `netwatch demo` exercises a temporary simulation without network or package changes.
+
 ## Work
 
 1. Inspect `git status -sb`, current branch, staged paths and recent commits. Work on `main`; preserve unrelated edits and `.pi/` state.
-2. Read `docs/DELIVERY.md`, `docs/DESIGN.md` and relevant code/tests. The README owns usable commands; design proposals are not implementation evidence.
-3. Make the smallest complete change. Use plain adapter functions, SQLite and standard-library Python. Do not rebuild package managers, approval servers or agent frameworks.
+2. Read `docs/DELIVERY.md`, `docs/DESIGN.md`, `docs/USAGE.md` and relevant code/tests. Keep CLI changes reflected in the usage manual.
+3. Make the smallest complete change. Use plain adapter functions, SQLite and the standard library; Rich handles terminal presentation. Pin dependencies in `requirements.lock`.
 4. Test collection, matching, query and update success/failure paths with injected runners and temporary databases. Never change development-host packages, services, credentials or remote systems to prove an updater works. Live operations require explicit target authorization.
 
 ## Boundaries

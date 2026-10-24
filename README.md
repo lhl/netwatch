@@ -58,7 +58,7 @@ netwatch history --name server  # changes and update attempts
 netwatch check server --refresh # fetch fresh advisories
 ```
 
-Advisories are cached for one hour. Failed checks preserve earlier findings and appear in the report. The default report groups findings by package and shows a short update list; add `--all` to `status` or `check` to expand it.
+Advisories are cached for one hour. Failed checks preserve earlier findings and appear in the report. The default report groups findings by package and shows a short update list; add `--all` to `status` or `check` to expand it. Color terminals highlight affected findings in red, review findings in yellow and other updates in cyan. Use `NO_COLOR=1` for plain output.
 
 ### Apply updates
 
@@ -99,6 +99,8 @@ Data lives in `~/.local/state/netwatch/state.db`. To use another database, put `
 python3 -B -m unittest discover -s tests -v
 python3 -B scripts/check_package.py
 ```
+
+For development, install the pinned dependencies with `python3 -m pip install --require-hashes -r requirements.lock`. The packaging check downloads those wheels, then installs and tests from the local copies.
 
 Add package-manager support in [`netwatch/adapters.py`](netwatch/adapters.py) and advisory matching in [`netwatch/sources.py`](netwatch/sources.py). See the [design contract](docs/DESIGN.md).
 
