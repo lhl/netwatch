@@ -71,6 +71,28 @@ class ColorTests(unittest.TestCase):
         self.assertIn("\x1b[33m", review_line)
         self.assertNotIn("\x1b[31m", review_line)
 
+    def test_wide_terminal_uses_tables_and_compact_summary(self):
+        result = test_arch_output.OutputTests().result()
+        report = result[0]["report"]
+        report["findings"][0]["severity"] = "Critical"
+        output = self.render(result)
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+        self.assertIn("╭", plain)
+        self.assertIn("0 affected", plain)
+        self.assertNotIn("Affected: 0 packages", plain)
+        self.assertIn("Reported severity", plain)
+        self.assertIn("CRITICAL", plain)
+        self.assertIn("Installed", plain)
+        self.assertIn("Available", plain)
+        self.assertNotIn("Reported fixes: none listed", plain)
+        self.assertEqual(plain.count("No published fix versions"), 1)
+        self.assertIn("Showing 10 of 50 updates", plain)
+        self.assertIn("\x1b[1;37;41m", output)
+        full = re.sub(r"\x1b\[[0-9;]*m", "", self.render(result, show_all=True))
+        self.assertIn("pkg-49", full)
+        self.assertIn("AVG-199", full)
+        self.assertNotIn("Showing 10", full)
+
     def test_narrow_terminal_and_generic_results_render(self):
         result = test_arch_output.OutputTests().result()
         output = self.render(result, env={"COLUMNS": "40"})

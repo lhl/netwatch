@@ -96,6 +96,8 @@ netwatch status server --all   # expand every row
 netwatch --json status server  # complete records, including evidence and inventory
 ```
 
+Color terminals at least 90 columns wide show a summary panel and aligned finding/update tables. Narrower terminals use a stacked layout. The reported-severity column is separate from finding status; empty finding sections remain visible as counts in the summary.
+
 Color terminals show affected findings in red, review findings in yellow and ordinary updates in cyan. Updates marked `[affected]` or `[review]` have an associated finding; the marker does not establish that the candidate fixes it. Source-reported severity is shown separately where available. Pipes and redirected files use plain text. Set `NO_COLOR=1` to disable styling; `--json` always emits plain JSON.
 
 The summary includes observation times, failed checks and the count of historical notices filtered out. Packages with available updates appear first in finding groups; updates for affected packages appear first, followed by review matches and other updates.

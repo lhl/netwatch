@@ -53,6 +53,8 @@ Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv
 - [x] Link the operating manual from AGENTS and make it cover installation, registration, checks, queries, updates and recovery.
 - [x] Pass 61 tests, package/dependency checks and a cached local pseudo-terminal check. No new inventory or update operations.
 
+- [x] Improve wide-terminal hierarchy with a summary panel, finding/update tables and a separate reported-severity column; retain stacked narrow output. All 62 tests and package checks pass; cached local output inspected through a pseudo-terminal.
+
 ## Before using live updates
 
 Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.

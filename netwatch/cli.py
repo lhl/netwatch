@@ -5,6 +5,9 @@ import os
 import sys
 from rich.console import Console
 from rich.text import Text
+from rich.table import Table
+from rich.panel import Panel
+from rich import box
 from datetime import datetime, timezone
 from collections import defaultdict
 import sqlite3
@@ -99,6 +102,13 @@ def display(result, json_output=False, show_all=False):
     # Never emit terminal control sequences to pipes or machine-readable output.
     color = not json_output and sys.stdout.isatty() and "NO_COLOR" not in os.environ and os.environ.get("TERM") != "dumb"
     console = Console(file=sys.stdout, force_terminal=True, highlight=False, markup=False) if color else None
+    wide = console is not None and console.width >= 90
+    width = min(console.width, 120) if console else 120
+    def table(*headers):
+        result = Table(box=box.SIMPLE_HEAD, expand=True, width=width, header_style="bold", border_style="dim", padding=(0, 1))
+        for header in headers:
+            result.add_column(header, overflow="fold")
+        return result
     def emit(value="", style=None):
         if console:
             console.print(Text(value, style=style or ""))
@@ -115,7 +125,22 @@ def display(result, json_output=False, show_all=False):
     date = lambda at: datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if at is not None else "unknown"
     for item in result:
         t, report = item["target"], item["report"]
-        emit(f"{safe(t['name'])} ({safe(t['kind'])} on {safe(t['host'])})", "bold cyan")
+        if wide and report:
+            affected_count = len({r["package"] for r in report["findings"] if r["state"] == "affected"})
+            review_count = len({r["package"] for r in report["findings"] if r["state"] == "unknown"})
+            summary = Text()
+            summary.append(f"{safe(t['kind'])} on {safe(t['host'])}  |  Checked {date(report['at'])}\n", style="dim")
+            for value, style in ((f"{len(report['packages'])} installed", "bold"),
+                                 (f"{affected_count} affected", "bold red" if affected_count else "bold"),
+                                 (f"{review_count} need review", "bold yellow" if review_count else "bold"),
+                                 (f"{len(report['updates'])} available update{'s' if len(report['updates']) != 1 else ''}", "bold cyan")):
+                if summary.plain[-1:] != "\n":
+                    summary.append("    ")
+                summary.append(value, style)
+            console.print(Panel(summary, title=Text(safe(t["name"]), style="bold cyan"), title_align="left",
+                                border_style="cyan", box=box.ROUNDED, width=width))
+        else:
+            emit(f"{safe(t['name'])} ({safe(t['kind'])} on {safe(t['host'])})", "bold cyan")
         if item.get("error"):
             emit("  Error: " + safe(item["error"]), "bold red")
         if (item.get("last_attempt") or {}).get("kind") == "collection_failed":
@@ -123,7 +148,8 @@ def display(result, json_output=False, show_all=False):
         if not report:
             emit("  No inventory collected. Run netwatch check " + safe(t["name"]), "yellow")
             continue
-        emit(f"  Checked {date(report['at'])} | {len(report['packages'])} installed packages | {len(report['updates'])} available updates", "dim")
+        if not wide:
+            emit(f"  Checked {date(report['at'])} | {len(report['packages'])} installed packages | {len(report['updates'])} available updates", "dim")
         if not report["advisory_check_ok"]:
             emit("  Advisory check incomplete; retained results need review.", "bold yellow")
         if report["update_error"]:
@@ -137,10 +163,14 @@ def display(result, json_output=False, show_all=False):
             for row in report["findings"]:
                 if row["state"] == state:
                     groups[(row["package"], row["installed"])].append(row)
+            if wide and not groups:
+                continue
             style = ("bold red" if state == "affected" else "bold yellow") if groups else "bold"
             emit(f"\n{label}: {len(groups)} packages ({sum(map(len, groups.values()))} notices)", style)
-            if groups and all(not r["fix_versions"] for rows in groups.values() for r in rows):
-                emit("  These notices have no published fix version; check applicability before taking action.", "dim")
+            no_fixes = groups and all(not r["fix_versions"] for rows in groups.values() for r in rows)
+            if no_fixes:
+                emit("  No published fix versions; applicability needs review.", "dim")
+            grid = table("Package", "Installed", "Notices", "Reported severity", *([] if no_fixes else ["Reported fixes"])) if wide else None
             ordered = sorted(groups, key=lambda key: (key[0] not in updates, key))
             for key in ordered if show_all else ordered[:5]:
                 rows = groups[key]
@@ -148,11 +178,30 @@ def display(result, json_output=False, show_all=False):
                 fixes = sorted({v for r in rows for v in r["fix_versions"]})
                 count = len(rows)
                 severities = sorted({r["severity"] for r in rows if isinstance(r.get("severity"), str) and r["severity"].lower() in ("critical", "high", "medium", "low")})
-                severity = " | reported severity: " + ", ".join(severities) if severities else ""
-                emit(f"  {safe(key[0])} {safe(key[1])}: {count} {'notice' if count == 1 else 'notices'}{safe(severity)}", "bold")
-                emit("    " + safe(", ".join(ids if show_all else ids[:3])) + (" ..." if not show_all and len(ids) > 3 else ""), "dim")
-                emit("    Reported fixes: " + safe(", ".join(fixes if show_all else fixes[:3]) or "none listed"))
+                ids_text = safe(", ".join(ids if show_all else ids[:3])) + (" ..." if not show_all and len(ids) > 3 else "")
+                fixes_text = safe(", ".join(fixes if show_all else fixes[:3]) or "none listed")
+                if grid is not None:
+                    severity_cell = Text()
+                    colors = {"critical": "bold white on red", "high": "bold red", "medium": "yellow", "low": "cyan"}
+                    for severity in sorted(severities, key=lambda s: list(colors).index(s.lower())):
+                        if severity_cell.plain:
+                            severity_cell.append(" / ")
+                        severity_cell.append(severity.upper(), colors[severity.lower()])
+                    cells = [Text(safe(key[0]), style="bold"), Text(safe(key[1]), style="dim"),
+                             Text(ids_text), severity_cell if severities else Text("Unknown", style="dim")]
+                    if not no_fixes:
+                        cells.append(Text(fixes_text))
+                    grid.add_row(*cells)
+                else:
+                    severity = " | reported severity: " + ", ".join(severities) if severities else ""
+                    emit(f"  {safe(key[0])} {safe(key[1])}: {count} {'notice' if count == 1 else 'notices'}{safe(severity)}", "bold")
+                    emit("    " + ids_text, "dim")
+                    emit("    Reported fixes: " + fixes_text)
                 shortened |= not show_all and (len(ids) > 3 or len(fixes) > 3)
+            if grid is not None:
+                console.print(grid)
+                if not show_all and len(ordered) > 5:
+                    emit(f"  Showing 5 of {len(ordered)} packages.", "dim")
             shortened |= not show_all and len(ordered) > 5
         omitted = sum(e.get("matching", {}).get("fixed_notices_omitted", 0) for e in report.get("evidence", []))
         if omitted:
@@ -166,12 +215,27 @@ def display(result, json_output=False, show_all=False):
             affected = {r["package"] for r in report["findings"] if r["state"] == "affected"}
             review = {r["package"] for r in report["findings"] if r["state"] == "unknown"}
             ordered = sorted(updates, key=lambda n: (n not in affected, n not in review, n))
+            grid = table("Package", "Installed", "Available", "Finding") if wide else None
             for n in ordered if show_all else ordered[:10]:
                 label, style = (" [affected]", "bold red") if n in affected else ((" [review]", "yellow") if n in review else ("", "cyan"))
-                emit(f"  {safe(n)}: {safe(', '.join(sorted(versions[n])) or '?')} -> {safe(updates[n].get('candidate') or 'unknown')}{label}", style)
+                installed = safe(', '.join(sorted(versions[n])) or '?')
+                candidate = safe(updates[n].get('candidate') or 'unknown')
+                if grid is not None:
+                    grid.add_row(Text(safe(n), style="bold"), Text(installed, style="dim"), Text(candidate, style="bold cyan"),
+                                 Text(label.strip() or "No matching advisory", style=style if label else "dim"))
+                else:
+                    emit(f"  {safe(n)}: {installed} -> {candidate}{label}", style)
+            if grid is not None:
+                console.print(grid)
+                if not show_all and len(ordered) > 10:
+                    emit(f"  Showing 10 of {len(ordered)} updates.", "dim")
             shortened |= not show_all and len(ordered) > 10
         for warning in report["warnings"]:
-            emit("\n" + safe(warning), "yellow")
+            if wide:
+                console.print(Panel(Text(safe(warning.removeprefix("Coverage: "))), title="Coverage" if warning.startswith("Coverage:") else "Check note",
+                                    title_align="left", border_style="yellow", box=box.ROUNDED, width=width))
+            else:
+                emit("\n" + safe(warning), "yellow")
         if shortened:
             emit(f"\nAll rows: netwatch status {safe(t['name'])} --all", "dim")
         emit(f"Full records: netwatch --json status {safe(t['name'])}\n", "dim")
