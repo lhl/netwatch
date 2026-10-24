@@ -38,6 +38,13 @@ Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv
 - [x] Move command/reference details into `docs/USAGE.md`; remove defensive boilerplate and obsolete implementation history from active prose.
 - [x] Apply clear-writing and anti-slop passes using the supplied writing guidance. Verify 12 shell blocks, 23 CLI examples and 8 local links/anchors, plus the simulated workflow and installed package demo.
 
+## Output improvements from the local check
+
+- [x] Compare Arch/CachyOS fixed versions with target `vercmp`; batch remote comparisons and keep uncertain/foreign-package coverage visible.
+- [x] Summarize affected packages, review notices and update versions; provide `--all` and complete JSON output.
+- [x] Record matching-rule changes as reassessment, preserve old scans, and avoid duplicate finding events on unchanged checks.
+- [x] Pass 56 tests, module/installed demos, packaging and synthetic native-version comparisons. Rerun the authorized local check without applying updates; keep private inventory outside Git.
+
 ## Before using live updates
 
 Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.

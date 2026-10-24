@@ -69,6 +69,8 @@ class Store:
     def save_scan(self, name, report):
         with self.transaction():
             previous = self.latest(name)
+            if previous and not report["advisory_check_ok"]:
+                report["matcher_revision"] = previous.get("matcher_revision", 1)
             old = {r["key"]: r for r in previous["findings"]} if previous else {}
             new = {r["key"]: r for r in report["findings"]}
             for key, row in new.items():
@@ -79,8 +81,13 @@ class Store:
                     self.event(name, "finding_changed" if key in old else "finding_new", row)
             # Only successful evidence collection can clear previous findings.
             if report["advisory_check_ok"]:
-                for key in old.keys() - new.keys():
-                    self.event(name, "finding_no_longer_detected", old[key])
+                removed = old.keys() - new.keys()
+                if removed and previous.get("matcher_revision", 1) != report.get("matcher_revision", 1):
+                    self.event(name, "findings_reassessed", {"previous_scan": previous["id"], "removed": len(removed),
+                               "reason": "Matching rules changed; fewer findings do not imply packages were updated"})
+                else:
+                    for key in removed:
+                        self.event(name, "finding_no_longer_detected", old[key])
             else:
                 for key in old.keys() - new.keys():
                     new[key] = {**old[key], "state": "unknown", "reason": "Evidence incomplete; previous finding retained"}

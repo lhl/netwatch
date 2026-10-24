@@ -4,6 +4,7 @@ import time
 import urllib.request
 import urllib.error
 
+from . import adapters
 from .core import Error, digest
 from .versions import compare_versions
 
@@ -98,27 +99,34 @@ def ubuntu(packages, data):
     return result
 
 
-def arch(packages, data, kind):
+def arch(packages, data, kind, *, compare=None, stats=None):
     if not isinstance(data, list) or not data:
         raise Error("Arch feed is empty or malformed")
-    result = []
     installed = {p["name"]: p for p in packages}
-    for row in data:
-        for n in row["packages"]:
-            if n not in installed:
-                continue
-            p = installed[n]
-            if kind == "arch" and not p.get("foreign") and row.get("fixed") == p["version"]:
-                continue
-            exact = (kind == "arch" and not p.get("foreign") and p["version"] == row.get("affected")
-                     and row.get("status") in ("Vulnerable", "Fixed"))
-            item = finding(p, row["name"], "affected" if exact else "unknown",
-                           [row["fixed"]] if row.get("fixed") else [],
-                           "Exact published affected version" if exact else
-                           "Name match only; rebuild/version applicability requires investigation",
-                           "https://security.archlinux.org/" + row["name"])
-            item.update(references=row.get("issues", []), severity=row.get("severity", "Unknown"))
-            result.append(item)
+    matches = [(installed[n], row) for row in data for n in row["packages"] if n in installed]
+    def comparable(p, row):
+        return (not p.get("foreign") and row.get("fixed") != "0" and
+                adapters.valid_arch_version(p["version"]) and adapters.valid_arch_version(row.get("fixed")))
+    pairs = sorted({(p["version"], row["fixed"]) for p, row in matches if comparable(p, row)})
+    if pairs and compare is None:
+        raise Error("Arch matching requires vercmp on the target")
+    orders = compare(pairs) if pairs else {}
+    result, omitted = [], 0
+    for p, row in matches:
+        if comparable(p, row) and orders[(p["version"], row["fixed"])] >= 0:
+            omitted += 1
+            continue
+        exact = (kind == "arch" and not p.get("foreign") and p["version"] == row.get("affected")
+                 and row.get("status") in ("Vulnerable", "Fixed"))
+        item = finding(p, row["name"], "affected" if exact else "unknown",
+                       [row["fixed"]] if row.get("fixed") else [],
+                       "Exact published affected version" if exact else
+                       "Installed version needs review against this notice; package lineage or fix evidence is uncertain",
+                       "https://security.archlinux.org/" + row["name"])
+        item.update(references=row.get("issues", []), severity=row.get("severity", "Unknown"))
+        result.append(item)
+    if stats is not None:
+        stats["fixed_notices_omitted"] = omitted
     return result
 
 
@@ -145,7 +153,7 @@ def osv(p, data):
     return result
 
 
-def assess(t, packages, store, *, offline=False, refresh=False, refreshed=None, request=fetch):
+def assess(t, packages, store, *, offline=False, refresh=False, refreshed=None, request=fetch, runner=adapters.run):
     findings, warnings, evidence, complete = [], [], [], True
     refreshed = set() if refreshed is None else refreshed
     kind = t["kind"]
@@ -163,8 +171,11 @@ def assess(t, packages, store, *, offline=False, refresh=False, refreshed=None, 
             findings = ubuntu(packages, cached("ubuntu-usn", USN))
             warnings.append("Coverage: Noble published security notices only, not all CVEs or pre-patch vulnerabilities; Pro/ESM excluded")
         elif kind in ("arch", "cachyos"):
-            findings = arch(packages, cached("arch-tracker", ARCH), kind)
-            warnings.append("Coverage: Arch tracker is incomplete and may lag current releases; name-only and CachyOS matches require investigation")
+            data = cached("arch-tracker", ARCH)
+            stats = {}
+            findings = arch(packages, data, kind, compare=lambda pairs: adapters.arch_compare(t, pairs, runner), stats=stats)
+            evidence[-1]["matching"] = stats
+            warnings.append("Coverage: Arch tracker may lag releases; remaining CachyOS and foreign-package matches require investigation")
         else:
             unknown = sum(p["ecosystem"] == "Conda" for p in packages)
             if unknown:

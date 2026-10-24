@@ -265,11 +265,12 @@ class SourceTests(unittest.TestCase):
     def test_arch_and_rebuild_uncertainty(self):
         rows = [{"name":"AVG-1", "packages":["test"], "affected":"1-1", "fixed":"2-1", "status":"Fixed"}]
         p = adapters.package("test", "1-1", "Arch", foreign=False)
-        self.assertEqual(sources.arch([p], rows, "arch")[0]["state"], "affected")
-        self.assertEqual(sources.arch([p], rows, "cachyos")[0]["state"], "unknown")
-        self.assertEqual(sources.arch([{**p,"version":"2-1"}], rows, "arch"), [])
+        compare = lambda pairs: {pair: 0 if pair[0] == pair[1] else -1 for pair in pairs}
+        self.assertEqual(sources.arch([p], rows, "arch", compare=compare)[0]["state"], "affected")
+        self.assertEqual(sources.arch([p], rows, "cachyos", compare=compare)[0]["state"], "unknown")
+        self.assertEqual(sources.arch([{**p,"version":"2-1"}], rows, "arch", compare=compare), [])
         rows[0]["status"] = "Unknown"
-        self.assertEqual(sources.arch([p], rows, "arch")[0]["state"], "unknown")
+        self.assertEqual(sources.arch([p], rows, "arch", compare=compare)[0]["state"], "unknown")
 
     def test_osv_fixes_only_for_correct_package(self):
         p = adapters.package("jinja2", "2.11.2", "PyPI")

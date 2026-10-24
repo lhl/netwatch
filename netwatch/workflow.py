@@ -13,7 +13,7 @@ def check(store, t, *, offline=False, refresh=False, refreshed=None, runner=adap
     except (Error, ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError) as exc:
         store.event(t["name"], "collection_failed", {"error": str(exc) if isinstance(exc, Error) else "Invalid inventory output"})
         raise Error("Inventory collection failed; previous report retained (see history)") from exc
-    findings, warnings, complete, evidence = sources.assess(t, packages, store, offline=offline, refresh=refresh, refreshed=refreshed, request=request)
+    findings, warnings, complete, evidence = sources.assess(t, packages, store, offline=offline, refresh=refresh, refreshed=refreshed, request=request, runner=runner)
     available, update_error = [], None
     if offline:
         update_error = "Update availability not refreshed in offline mode"
@@ -32,7 +32,8 @@ def check(store, t, *, offline=False, refresh=False, refreshed=None, runner=adap
         warnings.append("Environment updates do not update separately pip-installed packages")
     return store.save_scan(t["name"], {"target": t, "packages": packages, "findings": findings,
                                       "updates": available, "warnings": warnings,
-                                      "advisory_check_ok": complete, "evidence": evidence, "update_error": update_error})
+                                      "advisory_check_ok": complete, "evidence": evidence, "update_error": update_error,
+                                      "matcher_revision": 2 if t["kind"] in ("arch", "cachyos") else 1})
 
 
 def preview(store, t, runner=adapters.run):

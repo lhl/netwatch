@@ -2,7 +2,8 @@
 import argparse
 import json
 import os
-from pathlib import Path
+from datetime import datetime, timezone
+from collections import defaultdict
 import sqlite3
 
 from . import adapters, sources, workflow
@@ -24,11 +25,13 @@ def parser():
     commands.add_parser("list", help="list explicitly registered environments")
     check = commands.add_parser("check", help="collect inventory, query/cache advisories and discover updates")
     check.add_argument("name", nargs="?", help="omit to check all registered environments")
+    check.add_argument("--all", action="store_true", help="show all finding and update rows")
     mode = check.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="use fresh advisory cache; still collects inventory over SSH")
     mode.add_argument("--refresh", action="store_true", help="fetch fresh advisories instead of using the one-hour cache")
     status = commands.add_parser("status", help="query cached reports without connecting")
     status.add_argument("name", nargs="?")
+    status.add_argument("--all", action="store_true", help="show all finding and update rows")
     history = commands.add_parser("history", help="query events, including changes, failures and update attempts")
     history.add_argument("--name")
     history.add_argument("--since", type=int, default=0, help="event cursor; at most 1000 events per page")
@@ -89,21 +92,68 @@ def dispatch(args, store, runner, request):
     raise Error("Unknown command")
 
 
-def display(result, json_output=False):
-    # Escaping prevents control sequences in remote package names or source text.
-    if not json_output and isinstance(result, list) and result and "report" in result[0]:
-        for item in result:
-            report = item["report"]
-            print(canonical({"environment": item["target"]["name"], "last_attempt": item["last_attempt"],
-                             "error": item.get("error"), "pending_updates": item["pending_updates"],
-                             "checked_at": report["at"] if report else None}))
-            if report:
-                print(f"  {len(report['packages'])} packages; {len(report['findings'])} findings; {len(report['updates'])} available updates")
-                for field in ("findings", "updates", "warnings"):
-                    for row in report[field]:
-                        print("  " + field + ": " + canonical(row))
-    else:
+def display(result, json_output=False, show_all=False):
+    if json_output or not (isinstance(result, list) and result and "report" in result[0]):
         print(json.dumps(result, ensure_ascii=True, indent=None if json_output else 2))
+        return
+    safe = lambda value: json.dumps(str(value), ensure_ascii=True)[1:-1]
+    date = lambda at: datetime.fromtimestamp(at, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if at is not None else "unknown"
+    for item in result:
+        t, report = item["target"], item["report"]
+        print(f"{safe(t['name'])} ({safe(t['kind'])} on {safe(t['host'])})")
+        if item.get("error"):
+            print("  Error: " + safe(item["error"]))
+        if (item.get("last_attempt") or {}).get("kind") == "collection_failed":
+            print("  Collection failed; showing the previous report.")
+        if not report:
+            print("  No inventory collected. Run netwatch check " + safe(t["name"]))
+            continue
+        print(f"  Checked {date(report['at'])} | {len(report['packages'])} installed packages | {len(report['updates'])} available updates")
+        if not report["advisory_check_ok"]:
+            print("  Advisory check incomplete; retained results need review.")
+        if report["update_error"]:
+            print(f"  Update check: {safe(report['update_error'])}; last observed {date(report.get('updates_observed_at'))}")
+        for plan in item["pending_updates"]:
+            print(f"  Update plan {plan['id']}: {safe(plan['status'])}")
+        updates = {u["package"]: u for u in report["updates"]}
+        shortened = False
+        for state, label in (("affected", "Affected"), ("unknown", "Needs review")):
+            groups = defaultdict(list)
+            for row in report["findings"]:
+                if row["state"] == state:
+                    groups[(row["package"], row["installed"])].append(row)
+            print(f"\n{label}: {len(groups)} packages ({sum(map(len, groups.values()))} notices)")
+            if groups and all(not r["fix_versions"] for rows in groups.values() for r in rows):
+                print("  These notices have no published fix version; check applicability before taking action.")
+            ordered = sorted(groups, key=lambda key: (key[0] not in updates, key))
+            for key in ordered if show_all else ordered[:5]:
+                rows = groups[key]
+                ids = sorted({r["advisory"] for r in rows})
+                fixes = sorted({v for r in rows for v in r["fix_versions"]})
+                count = len(rows)
+                print(f"  {safe(key[0])} {safe(key[1])}: {count} {'notice' if count == 1 else 'notices'}")
+                print("    " + safe(", ".join(ids if show_all else ids[:3])) + (" ..." if not show_all and len(ids) > 3 else ""))
+                print("    Reported fixes: " + safe(", ".join(fixes if show_all else fixes[:3]) or "none listed"))
+                shortened |= not show_all and (len(ids) > 3 or len(fixes) > 3)
+            shortened |= not show_all and len(ordered) > 5
+        omitted = sum(e.get("matching", {}).get("fixed_notices_omitted", 0) for e in report.get("evidence", []))
+        if omitted:
+            print(f"\n{omitted} historical notices omitted: installed versions meet the tracker fixes.")
+        if updates:
+            print("\nAvailable updates:")
+            versions = defaultdict(set)
+            for p in report["packages"]:
+                versions[p["name"]].add(p["version"])
+            affected = {r["package"] for r in report["findings"] if r["state"] == "affected"}
+            ordered = sorted(updates, key=lambda n: (n not in affected, n))
+            for n in ordered if show_all else ordered[:10]:
+                print(f"  {safe(n)}: {safe(', '.join(sorted(versions[n])) or '?')} -> {safe(updates[n].get('candidate') or 'unknown')}")
+            shortened |= not show_all and len(ordered) > 10
+        for warning in report["warnings"]:
+            print("\n" + safe(warning))
+        if shortened:
+            print(f"\nAll rows: netwatch status {safe(t['name'])} --all")
+        print(f"Full records: netwatch --json status {safe(t['name'])}\n")
 
 
 def main(argv=None, *, runner=adapters.run, request=sources.fetch):
@@ -116,7 +166,7 @@ def main(argv=None, *, runner=adapters.run, request=sources.fetch):
         else:
             store = Store(args.db)
             result = dispatch(args, store, runner, request)
-        display(result, args.json)
+        display(result, args.json, show_all=getattr(args, "all", False))
         if args.command == "check" and any(r.get("error") or not r["report"]["advisory_check_ok"] or r["report"]["update_error"] for r in result):
             return 1
         return 0

@@ -7,11 +7,13 @@
 | Kind | Package tools | Advisory coverage |
 | --- | --- | --- |
 | `ubuntu` | dpkg, APT; Ubuntu 24.04 noble amd64 | Canonical notices for published standard-security fixes; excludes Pro/ESM and pre-patch vulnerabilities. |
-| `arch` | pacman, `checkupdates` from pacman-contrib | Exact affected-version matches with a `Vulnerable` or `Fixed` tracker status are flagged. Other matches need investigation; the tracker may lag releases. |
-| `cachyos` | pacman, `checkupdates` | Arch advisory names provide leads; applicability to rebuilt packages is unknown. |
+| `arch` | pacman, `vercmp`, `checkupdates` from pacman-contrib | Exact affected-version matches with a `Vulnerable` or `Fixed` tracker status are flagged. Other matches need investigation; the tracker may lag releases. |
+| `cachyos` | pacman, `vercmp`, `checkupdates` | Arch advisory names provide leads; applicability to rebuilt packages is unknown. |
 | `conda`, `mamba` | The named tool and an existing prefix | OSV for pip/PyPI-origin entries only. Conda-native coverage is unknown. |
 | `uv` | uv and an installed project `.venv` | OSV for installed PyPI packages. |
 | `npm` | npm and installed dependencies | OSV for installed npm packages, including transitive dependencies. |
+
+For repository packages on Arch/CachyOS, `vercmp` filters out notices whose fixed version is at or below the installed version. This removes historical matches; it does not verify CachyOS patch contents. Foreign packages and notices without usable fix versions remain for review. A missing or failed `vercmp` makes the advisory check incomplete.
 
 Additional registration examples:
 
@@ -38,6 +40,17 @@ The Ubuntu feed was about 354 MB at the 2026-10-23 check. netwatch caches about 
 
 `check` exits 1 when collection, advisory checking or update discovery is incomplete, including when `--offline` skips update discovery. Earlier findings and update observations are retained with their timestamps; the report identifies the failed or skipped step.
 
+## Report output
+
+`check` and `status` group findings by package, separate affected packages from notices needing review, and show installed-to-candidate update versions. The default view shows five package groups per category and ten updates.
+
+```bash
+netwatch status server --all   # expand every row
+netwatch --json status server  # complete records, including evidence and inventory
+```
+
+The summary includes observation times, failed checks and the count of historical notices filtered out. Packages with available updates appear first in finding groups; affected packages appear first in the update list.
+
 ## History
 
 ```bash
@@ -47,7 +60,7 @@ netwatch history --name server
 
 Each page contains up to 1,000 events and a `next_cursor`. Save that cursor after processing the page. Reads do not consume events.
 
-Findings have first/last-seen times. History records new or changed findings, failed checks and update attempts. Findings absent from a successful check produce `finding_no_longer_detected` events.
+Findings have first/last-seen times. History records new or changed findings, failed checks and update attempts. Findings absent from a successful check produce `finding_no_longer_detected` events. When a matching-rule change removes findings, one `findings_reassessed` event records the count and links to the previous scan; it does not report package updates.
 
 ## Updates
 

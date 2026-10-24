@@ -58,7 +58,7 @@ netwatch history --name server  # changes and update attempts
 netwatch check server --refresh # fetch fresh advisories
 ```
 
-Advisories are cached for one hour. Failed checks preserve earlier findings and appear in the report.
+Advisories are cached for one hour. Failed checks preserve earlier findings and appear in the report. The default report groups findings by package and shows a short update list; add `--all` to `status` or `check` to expand it.
 
 ### Apply updates
 

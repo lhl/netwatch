@@ -1,6 +1,7 @@
 """Environment adapters: ordinary functions and fixed package-manager commands."""
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -94,6 +95,29 @@ def arch_inventory(t, runner):
     foreign = {line.split()[0] for line in runner(t, ["pacman", "-Qm"], ok=(0, 1)).splitlines()}
     return [package(*line.split(), "Arch", foreign=line.split()[0] in foreign)
             for line in runner(t, ["pacman", "-Q"]).splitlines()]
+
+
+def valid_arch_version(value):
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+_:~\-]{0,255}", value) is not None
+
+
+def arch_compare(t, pairs, runner=run):
+    """Use the target's vercmp in bounded batches, including over SSH."""
+    if any(not valid_arch_version(v) for pair in pairs for v in pair):
+        raise Error("Unsupported Arch version syntax")
+    result = {}
+    script = 'while [ "$#" -ge 2 ]; do vercmp "$1" "$2" || exit; shift 2; done'
+    for start in range(0, len(pairs), 64):
+        batch = pairs[start:start + 64]
+        try:
+            output = runner(t, ["sh", "-c", script, "netwatch-vercmp", *[v for pair in batch for v in pair]])
+            values = [int(line) for line in output.splitlines()]
+            if len(values) != len(batch):
+                raise ValueError()
+        except (Error, ValueError) as exc:
+            raise Error("Arch version comparison failed; check vercmp is available on the target") from exc
+        result.update((pair, (value > 0) - (value < 0)) for pair, value in zip(batch, values))
+    return result
 
 
 def conda_inventory(t, runner):
