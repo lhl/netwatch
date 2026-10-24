@@ -6,6 +6,8 @@ netwatch tracks vulnerabilities and available updates across your machines and d
 - Matches installed packages against Canonical, Arch and OSV advisories.
 - Stores findings and history in SQLite, with text and JSON output for you or your agent.
 
+![netwatch status showing package findings, reported severity and available updates](docs/status-screenshot.png)
+
 ## Quick start
 
 Requires Python 3.12+ and Git.
