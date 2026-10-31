@@ -31,13 +31,14 @@ def parser():
     commands.add_parser("list", help="list explicitly registered environments")
     check = commands.add_parser("check", help="collect inventory, query/cache advisories and discover updates")
     check.add_argument("name", nargs="?", help="omit to check all registered environments")
-    check.add_argument("--all", action="store_true", help="show all finding and update rows")
+    check.add_argument("--all", action="store_true", help="show all finding, context and update rows")
+    check.add_argument("--context", action="store_true", help="add cve.now CVE context and pwn.watch incident review leads")
     mode = check.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="use fresh advisory cache; still collects inventory over SSH")
     mode.add_argument("--refresh", action="store_true", help="fetch fresh advisories instead of using the one-hour cache")
     status = commands.add_parser("status", help="query cached reports without connecting")
     status.add_argument("name", nargs="?")
-    status.add_argument("--all", action="store_true", help="show all finding and update rows")
+    status.add_argument("--all", action="store_true", help="show all finding, context and update rows")
     history = commands.add_parser("history", help="query events, including changes, failures and update attempts")
     history.add_argument("--name")
     history.add_argument("--since", type=int, default=0, help="event cursor; at most 1000 events per page")
@@ -78,7 +79,7 @@ def dispatch(args, store, runner, request):
         for t in targets:
             if args.command == "check":
                 try:
-                    workflow.check(store, t, offline=args.offline, refresh=args.refresh, refreshed=refreshed, runner=runner, request=request)
+                    workflow.check(store, t, offline=args.offline, refresh=args.refresh, refreshed=refreshed, context=args.context, runner=runner, request=request)
                 except Error as exc:
                     results.append({**status(store, t), "error": str(exc)})
                     continue
@@ -230,6 +231,35 @@ def display(result, json_output=False, show_all=False):
                 if not show_all and len(ordered) > 10:
                     emit(f"  Showing 10 of {len(ordered)} updates.", "dim")
             shortened |= not show_all and len(ordered) > 10
+        for source, label in (("cve_now", "cve.now CVE context"), ("pwn_watch", "pwn.watch incident leads")):
+            context = report.get("context", {}).get(source)
+            if context is None:
+                continue
+            rows = context["items"]
+            emit(f"\n{label}: {len(rows)} ({safe(context['status'])}; not applicability evidence)", "bold yellow")
+            for error in context["errors"]:
+                emit("  " + safe(error), "yellow")
+            for row in rows if show_all else rows[:5]:
+                retained = " [retained; not refreshed]" if row.get("retained") else ""
+                emit(f"  {safe(row['id'])}{retained} | observed {date(row.get('fetched_at'))}", "bold")
+                if source == "cve_now":
+                    signals = row["signals"]
+                    labels = ["CISA KEV listed"] if signals["kev"] is not None else []
+                    if signals["epssReached"] is not None:
+                        labels.append("EPSS threshold reached (not a current score)")
+                    if signals["public_exploit_sources"]:
+                        labels.append("public exploit references")
+                    emit("    Source status: " + safe(row["status"]) + (" | " + "; ".join(labels) if labels else " | no exploitation signals reported; not proof of safety"))
+                    if row["summary"]:
+                        summary = row["summary"]
+                        emit(f"    Model summary ({safe(summary['model'])}; CC-BY-4.0): {safe(summary['text'])}")
+                else:
+                    emit("    " + safe(row["title"]))
+                    emit(f"    Source patch status: {safe(row['patch_status'])}; advisory links: {safe(', '.join(row['matched_references']) or 'none')}; tags: {safe(', '.join(row['matched_tags']) or 'none')}")
+                emit("    " + safe(row["url"]), "dim")
+            if not show_all and len(rows) > 5:
+                emit(f"  Showing 5 of {len(rows)} context records.", "dim")
+                shortened = True
         for warning in report["warnings"]:
             if wide:
                 console.print(Panel(Text(safe(warning.removeprefix("Coverage: "))), title="Coverage" if warning.startswith("Coverage:") else "Check note",
@@ -252,7 +282,8 @@ def main(argv=None, *, runner=adapters.run, request=sources.fetch):
             store = Store(args.db)
             result = dispatch(args, store, runner, request)
         display(result, args.json, show_all=getattr(args, "all", False))
-        if args.command == "check" and any(r.get("error") or not r["report"]["advisory_check_ok"] or r["report"]["update_error"] for r in result):
+        if args.command == "check" and any(r.get("error") or not r["report"]["advisory_check_ok"] or r["report"]["update_error"] or
+                                            any(c["status"] == "incomplete" for c in r["report"].get("context", {}).values()) for r in result):
             return 1
         return 0
     except (Error, OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError, sqlite3.Error) as exc:

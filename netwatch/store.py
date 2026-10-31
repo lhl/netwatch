@@ -94,6 +94,22 @@ class Store:
                     if new[key] != old[key]:
                         self.event(name, "finding_changed", new[key])
             report["findings"] = sorted(new.values(), key=lambda r: r["key"])
+            old_context = previous.get("context", {}) if previous else {}
+            if "context" not in report and old_context:
+                report["context"] = {source: {**value, "status": "skipped",
+                    "errors": ["Context not requested on this check; showing retained records"]} for source, value in old_context.items()}
+            for source, value in report.get("context", {}).items():
+                if value["status"] != "ok":
+                    current = {r["id"]: r for r in value["items"]} if value["status"] != "skipped" else {}
+                    for row in old_context.get(source, {}).get("items", []):
+                        current.setdefault(row["id"], {**row, "retained": True})
+                    value["items"] = list(current.values())
+            def context_semantics(context):
+                return {source: {"status": value["status"], "errors": value["errors"],
+                    "items": [{k: v for k, v in row.items() if k != "fetched_at"} for row in value["items"]]}
+                    for source, value in context.items()}
+            if context_semantics(old_context) != context_semantics(report.get("context", {})):
+                self.event(name, "context_changed", {"context": report.get("context", {})})
             report["updates_observed_at"] = int(time.time())
             if report["update_error"]:
                 report["updates"] = previous["updates"] if previous else []

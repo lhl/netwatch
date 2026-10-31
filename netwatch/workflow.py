@@ -7,7 +7,7 @@ from . import adapters, sources
 from .core import Error, canonical, digest
 
 
-def check(store, t, *, offline=False, refresh=False, refreshed=None, runner=adapters.run, request=sources.fetch):
+def check(store, t, *, offline=False, refresh=False, refreshed=None, context=False, runner=adapters.run, request=sources.fetch):
     try:
         packages = adapters.inventory(t, runner)
     except (Error, ValueError, KeyError, TypeError, AttributeError, IndexError, RecursionError) as exc:
@@ -30,10 +30,16 @@ def check(store, t, *, offline=False, refresh=False, refreshed=None, runner=adap
         warnings.append("Outdated versions may be excluded by project constraints; apply updates the lock and syncs the project default environment")
     if t["kind"] in ("conda", "mamba"):
         warnings.append("Environment updates do not update separately pip-installed packages")
-    return store.save_scan(t["name"], {"target": t, "packages": packages, "findings": findings,
-                                      "updates": available, "warnings": warnings,
-                                      "advisory_check_ok": complete, "evidence": evidence, "update_error": update_error,
-                                      "matcher_revision": 2 if t["kind"] in ("arch", "cachyos") else 1})
+    report = {"target": t, "packages": packages, "findings": findings,
+              "updates": available, "warnings": warnings, "advisory_check_ok": complete,
+              "evidence": evidence, "update_error": update_error,
+              "matcher_revision": 2 if t["kind"] in ("arch", "cachyos") else 1}
+    if context:
+        previous = store.latest(t["name"])
+        linked = findings if complete or not previous else [*previous["findings"], *findings]
+        report["context"] = sources.context(packages, linked, store, offline=offline, refresh=refresh,
+                                            refreshed=refreshed, request=request)
+    return store.save_scan(t["name"], report)
 
 
 def preview(store, t, runner=adapters.run):

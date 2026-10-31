@@ -55,6 +55,12 @@ Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv
 
 - [x] Improve wide-terminal hierarchy with a summary panel, finding/update tables and a separate reported-severity column; retain stacked narrow output. All 62 tests and package checks pass; cached local output inspected through a pseudo-terminal.
 
+## Optional security context
+
+- [x] Add opt-in `check --context` with cve.now lookup for existing CVE references and pwn.watch live incident leads matched locally. Keep context separate from package applicability, fixed-version evidence and update commands.
+- [x] Cache bounded public requests, preserve source/model/license attribution and observation times, retain failed/skipped context, and record changes separately. Allow only the same-CVE HTTPS storage redirect used by cve.now.
+- [x] Document privacy, lookup caps, tag-matching limits, incomplete exit status and unchanged conda/CachyOS coverage. Pass 23 context tests, all 85 tests, module/installed demos, packaging checks and public-only smoke requests using synthetic package names. No registered-target checks or real updates.
+
 ## Before using live updates
 
 Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.
