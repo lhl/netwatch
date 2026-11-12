@@ -79,7 +79,7 @@ Custom uv environment locations, uninstalled lockfile dependencies, containers, 
 | `check NAME` | Collect inventory and discover updates; use advisory cache up to one hour old. |
 | `check NAME --refresh` | Also fetch fresh advisories. |
 | `check NAME --offline` | Still collect inventory, including over SSH. Use fresh cached advisories and skip update discovery. |
-| `check NAME --context` | Also fetch/cache cve.now context and locally match pwn.watch incidents. |
+| `check NAME --context` | Also fetch/cache cve.now context and locally match pwn.watch incidents and Cloudflare Zero Wire briefings. |
 | `status NAME` | Read stored results without connecting. |
 
 Ubuntu and Arch checks download public feeds. Python/npm checks query `api.osv.dev` with package names and versions. Package managers may contact their repositories during update discovery.
@@ -90,7 +90,7 @@ The Ubuntu feed was about 354 MB at the 2026-10-23 check. netwatch caches about 
 
 ## Optional security context
 
-Add `--context` to a check to use both supplementary sources. It is opt-in for each invocation; it does not register another target or change package matching.
+Add `--context` to a check to use all three supplementary sources. It is opt-in for each invocation; it does not register another target or change package matching.
 
 ```bash
 netwatch check server --context
@@ -103,18 +103,21 @@ netwatch --json status server
 | --- | --- | --- |
 | [cve.now](https://cve.now/) | Source-reported CVSS, CISA Known Exploited Vulnerabilities (KEV) listing, Exploit Prediction Scoring System (EPSS) threshold-reached dates, public-exploit indicators, upstream attribution and labeled model summaries. | CVE IDs referenced by existing findings; no inventory or lockfile upload. |
 | [pwn.watch](https://pwn.watch/) | Live patch and supply-chain incidents overlapping finding/advisory IDs or package/source names and product tags. | A request for the public incident catalog; relevance is matched locally. |
+| [Cloudflare Zero Wire](https://radar.cloudflare.com/security/zero-wire) | Curated briefings on critical Internet-facing vulnerabilities whose CVE tags match CVE IDs referenced by existing findings: title, link, Cloudflare priority label, dates and topic tags. | A request for the public RSS feed; relevance is matched locally. |
 
 cve.now is queried once per distinct CVE, in sorted-ID order, up to 20 IDs per environment per check. No new CVE lookup starts once 60 seconds have elapsed; an in-flight request can finish afterward. Omitted IDs and failed lookups leave context marked `incomplete`. EPSS threshold dates are not current probability scores. An absent exploitation signal does not establish safety. Model summaries are explanatory text, attributed to the named model and cve.now under CC-BY-4.0; upstream records retain their listed licenses.
 
 pwn.watch leads always have `state: review`. Matching uses lowercased exact package/source names, with PyPI punctuation normalization, and fixed aliases: `nodejs` → `node`, `bind9` → `bind`, and `linux-lts`/`linux-zen`/`linux-hardened` → `linux`. A `linux` tag match additionally requires a product name beginning with `Linux kernel`. Broad tags can still produce unrelated leads; missing tags, other aliases and uncollected software can hide relevant incidents. Breach-only, closed and example incidents are excluded. Its `cveIds` field can contain non-CVE advisory IDs; these are preserved without inventing CVE identities.
 
-Neither source can mark a package affected or fixed, clear an advisory finding, supply an update command, or establish conda/CachyOS patch applicability. A notice-level CVE reference is not a per-package CVE determination. A source's `patched` incident label is not evidence that your installation is patched. netwatch links to incident details but does not import their remediation commands or follow their links.
+Zero Wire briefings also have `state: review`. They match only when an exact CVE `<category>` tag equals a CVE ID on an existing finding or its notice references; topic tags such as `Node.js`, `PHP` or `Kernel` are kept for reading but never matched to packages. Briefings without CVE tags, and briefings about software netwatch does not collect (appliances, CMS sites, certificates, Alpine/musl), therefore never appear. The feed is small and curated: absence is not evidence of low risk. netwatch keeps only identities, dates, the `Needs attention`/`Reference` label and tags; the briefing prose, including its upgrade versions and mitigation steps, is not stored or shown. Read the linked briefing yourself. Cloudflare publishes Radar API data under CC BY-NC 4.0 and does not state separate feed terms; netwatch keeps a local cache only and does not redistribute it.
+
+No context source can mark a package affected or fixed, clear an advisory finding, supply an update command, or establish conda/CachyOS patch applicability. A notice-level CVE reference is not a per-package CVE determination. A source's `patched` incident label is not evidence that your installation is patched. netwatch links to incident details but does not import their remediation commands or follow their links.
 
 Context uses the one-hour cache and honors `--refresh` and `--offline`. Failed source checks retain earlier context with its original observation times and `retained: true`; a successful source check replaces that source's context. A later check without `--context`, including the post-update check from `apply`, marks saved context `skipped` and retains it for reference. It does not claim that retained incidents still apply. `status` and `history` remain network-free.
 
-JSON reports store this data separately under `report.context.cve_now` and `report.context.pwn_watch`, each with `status`, `items`, `errors` and fetch `evidence`. Items include `fetched_at`; pwn.watch also records catalog generation time and overlap reasons. Changes produce `context_changed` history events, not package-finding events. Default text output shows five records per source; `--all` and JSON expose all saved records.
+JSON reports store this data separately under `report.context.cve_now`, `report.context.pwn_watch` and `report.context.zero_wire`, each with `status`, `items`, `errors` and fetch `evidence`. Items include `fetched_at`; pwn.watch and Zero Wire also record catalog/feed build time (`generated_at`, `built_at`) and overlap reasons. Changes produce `context_changed` history events, not package-finding events. Default text output shows five records per source; `--all` and JSON expose all saved records.
 
-Context requests accept only the fixed public endpoints. cve.now entry lookups may make one HTTPS redirect to a `*.public.blob.vercel-storage.com` host at the exact same CVE's `/public/entries/ID.json` path, without credentials, ports, queries or fragments. Other redirects are refused. Responses are bounded to 2 MiB per cve.now entry and 20 MiB for the pwn.watch catalog, with a 10-second socket timeout and a 20-second elapsed-read check. These limits do not make the feeds authoritative or guarantee availability.
+Context requests accept only the fixed public endpoints. cve.now entry lookups may make one HTTPS redirect to a `*.public.blob.vercel-storage.com` host at the exact same CVE's `/public/entries/ID.json` path, without credentials, ports, queries or fragments. Other redirects are refused. The Zero Wire feed is parsed as XML only after rejecting document type and entity declarations. Responses are bounded to 2 MiB per cve.now entry, 5 MiB for the Zero Wire feed and 20 MiB for the pwn.watch catalog, with a 10-second socket timeout and a 20-second elapsed-read check. These limits do not make the feeds authoritative or guarantee availability.
 
 ## Report output
 

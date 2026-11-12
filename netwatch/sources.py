@@ -1,4 +1,5 @@
 """Advisory evidence, never installation commands. Explicit coverage limits."""
+import email.utils
 import json
 import re
 import time
@@ -6,6 +7,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
+import xml.etree.ElementTree as ET
 
 from . import adapters
 from .core import Error, digest, text
@@ -16,6 +18,7 @@ ARCH = "https://security.archlinux.org/issues/all.json"
 OSV = "https://api.osv.dev/v1/query"
 PWN = "https://pwn.watch/incidents.json"
 CVE_NOW = "https://cve.now/api/v1/entries/"
+ZERO_WIRE = "https://radar.cloudflare.com/security/zero-wire/rss"
 CVE_ID = r"CVE-[0-9]{4}-[0-9]{4,19}"
 
 
@@ -35,15 +38,16 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def fetch(url, body=None):
     cve_lookup = url.startswith(CVE_NOW) and re.fullmatch(CVE_ID, url[len(CVE_NOW):])
-    if url not in (USN, ARCH, OSV, PWN) and not cve_lookup:
+    if url not in (USN, ARCH, OSV, PWN, ZERO_WIRE) and not cve_lookup:
         raise Error("Unknown advisory endpoint")
-    if (cve_lookup or url == PWN) and body is not None:
+    briefing = cve_lookup or url in (PWN, ZERO_WIRE)
+    if briefing and body is not None:
         raise Error("Context sources accept only public GET requests")
     request = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None,
                                      headers={"User-Agent": "netwatch/0.2", "Content-Type": "application/json",
                                               "Accept-Encoding": "identity"})
-    limit = 512 * 1024 * 1024 if url == USN else (2 if cve_lookup else 20) * 1024 * 1024
-    timeout = 10 if cve_lookup or url == PWN else 30
+    limit = 512 * 1024 * 1024 if url == USN else (2 if cve_lookup else 5 if url == ZERO_WIRE else 20) * 1024 * 1024
+    timeout = 10 if briefing else 30
     start, chunks, size = time.monotonic(), [], 0
     try:
         with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
@@ -51,10 +55,11 @@ def fetch(url, body=None):
                 raise Error("Unsupported compressed advisory response")
             while chunk := response.read(64 * 1024):
                 size += len(chunk)
-                if size > limit or time.monotonic() - start > (20 if cve_lookup or url == PWN else 120):
+                if size > limit or time.monotonic() - start > (20 if briefing else 120):
                     raise Error("Advisory response exceeds byte/time limit")
                 chunks.append(chunk)
-        return json.loads(b"".join(chunks))
+        raw = b"".join(chunks)
+        return raw.decode("utf-8") if url == ZERO_WIRE else json.loads(raw)
     except (OSError, ValueError, urllib.error.URLError) as exc:
         raise Error("Advisory request failed; previous findings retained") from exc
 
@@ -275,6 +280,48 @@ def pwn_context(packages, findings, data):
                                          if len(r["updated_at"]) == 10 else datetime.fromisoformat(r["updated_at"]), r["id"]), reverse=True)
 
 
+def zero_wire_catalog(raw):
+    """Keep identities, dates, status and CVE tags; drop prose remediation and version advice."""
+    if not isinstance(raw, str) or re.search(r"<!(DOCTYPE|ENTITY)", raw, re.I):
+        raise Error("Invalid Zero Wire feed")
+    channel = ET.fromstring(raw).find("channel")
+    def date(value, label):
+        parsed = email.utils.parsedate_to_datetime(text(value, label))
+        if parsed.tzinfo is None:
+            raise Error("Zero Wire date lacks a time zone")
+        return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    items, seen = [], set()
+    for row in channel.findall("item"):
+        slug, at, updated = text(row.findtext("guid"), "briefing identity").partition("@")
+        if (not at or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,199}", slug) or slug in seen or
+                not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", updated) or
+                row.findtext("link") != "https://radar.cloudflare.com/security/zero-wire/" + slug):
+            raise Error("Invalid or duplicate Zero Wire briefing identity")
+        datetime.fromisoformat(updated)
+        seen.add(slug)
+        tags = [text(c.text, "briefing tag") for c in row.findall("category")]
+        if len(tags) > 100 or len(set(tags)) != len(tags):
+            raise Error("Invalid Zero Wire briefing tags")
+        priority = [t for t in tags if t in ("Needs attention", "Reference")]
+        items.append({"id": slug, "url": row.findtext("link"), "title": text(row.findtext("title"), "briefing title"),
+                      "published_at": date(row.findtext("pubDate"), "briefing date"), "updated_at": updated,
+                      "priority": priority[0] if len(priority) == 1 else "Unspecified",
+                      "references": sorted(t for t in tags if re.fullmatch(CVE_ID, t)),
+                      "tags": sorted(t for t in tags if t not in priority and not re.fullmatch(CVE_ID, t))})
+    if not items or len(items) > 1000:
+        raise Error("Invalid or empty Zero Wire feed")
+    return {"built_at": date(channel.findtext("lastBuildDate"), "feed date"), "items": items}
+
+
+def zero_wire_context(findings, catalog):
+    # Exact CVE tags only: product/topic tags such as "Node.js" or "Kernel" are not package identities.
+    references = set(advisory_references(findings, cves_only=True))
+    result = [{**row, "matched_references": sorted(references & set(row["references"])), "state": "review",
+               "reason": "Exact CVE reference overlap only; applicability and fixes are not established"}
+              for row in catalog["items"] if references & set(row["references"])]
+    return sorted(result, key=lambda r: (r["updated_at"], r["id"]), reverse=True)
+
+
 def context(packages, findings, store, *, offline=False, refresh=False, refreshed=None, request=fetch):
     """Optional context is stored separately; it cannot change findings or commands."""
     refreshed = set() if refreshed is None else refreshed
@@ -315,6 +362,14 @@ def context(packages, findings, store, *, offline=False, refresh=False, refreshe
     except failures:
         result["pwn_watch"] = {"status": "incomplete", "items": [], "evidence": [],
                                "errors": ["Incident context unavailable or invalid; prior context retained if present"]}
+    try:
+        feed = cached("zero-wire", ZERO_WIRE, zero_wire_catalog, evidence := [])
+        briefings = [{**row, "fetched_at": evidence[-1]["fetched_at"]} for row in zero_wire_context(findings, feed)]
+        result["zero_wire"] = {"status": "ok", "items": briefings, "errors": [], "evidence": evidence,
+                               "built_at": feed["built_at"]}
+    except failures + (ET.ParseError,):
+        result["zero_wire"] = {"status": "incomplete", "items": [], "evidence": [],
+                               "errors": ["Zero Wire briefings unavailable or invalid; prior context retained if present"]}
     return result
 
 

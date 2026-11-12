@@ -32,7 +32,7 @@ def parser():
     check = commands.add_parser("check", help="collect inventory, query/cache advisories and discover updates")
     check.add_argument("name", nargs="?", help="omit to check all registered environments")
     check.add_argument("--all", action="store_true", help="show all finding, context and update rows")
-    check.add_argument("--context", action="store_true", help="add cve.now CVE context and pwn.watch incident review leads")
+    check.add_argument("--context", action="store_true", help="add cve.now CVE context, pwn.watch incident leads and Cloudflare Zero Wire briefings")
     mode = check.add_mutually_exclusive_group()
     mode.add_argument("--offline", action="store_true", help="use fresh advisory cache; still collects inventory over SSH")
     mode.add_argument("--refresh", action="store_true", help="fetch fresh advisories instead of using the one-hour cache")
@@ -231,7 +231,8 @@ def display(result, json_output=False, show_all=False):
                 if not show_all and len(ordered) > 10:
                     emit(f"  Showing 10 of {len(ordered)} updates.", "dim")
             shortened |= not show_all and len(ordered) > 10
-        for source, label in (("cve_now", "cve.now CVE context"), ("pwn_watch", "pwn.watch incident leads")):
+        for source, label in (("cve_now", "cve.now CVE context"), ("pwn_watch", "pwn.watch incident leads"),
+                              ("zero_wire", "Cloudflare Zero Wire briefings")):
             context = report.get("context", {}).get(source)
             if context is None:
                 continue
@@ -253,6 +254,9 @@ def display(result, json_output=False, show_all=False):
                     if row["summary"]:
                         summary = row["summary"]
                         emit(f"    Model summary ({safe(summary['model'])}; CC-BY-4.0): {safe(summary['text'])}")
+                elif source == "zero_wire":
+                    emit("    " + safe(row["title"]))
+                    emit(f"    Source priority: {safe(row['priority'])}; updated {safe(row['updated_at'])}; matched CVEs: {safe(', '.join(row['matched_references']))}")
                 else:
                     emit("    " + safe(row["title"]))
                     emit(f"    Source patch status: {safe(row['patch_status'])}; advisory links: {safe(', '.join(row['matched_references']) or 'none')}; tags: {safe(', '.join(row['matched_tags']) or 'none')}")

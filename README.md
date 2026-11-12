@@ -4,7 +4,7 @@ netwatch tracks vulnerabilities and available updates across your machines and d
 
 - Checks Ubuntu, Arch/CachyOS, conda/mamba, uv and npm environments locally or over SSH.
 - Matches installed packages against Canonical, Arch and OSV advisories.
-- Optionally adds cve.now context and pwn.watch incident leads for review with `check --context`.
+- Optionally adds cve.now context, pwn.watch incident leads and Cloudflare Zero Wire briefings for review with `check --context`.
 - Stores findings and history in SQLite, with text and JSON output for you or your agent.
 
 ![netwatch status showing package findings, reported severity and available updates](docs/status-screenshot.png)
@@ -56,7 +56,7 @@ Python/npm checks send package names and versions to OSV. Add optional incident 
 netwatch check server --context
 ```
 
-This sends referenced CVE IDs to cve.now and downloads pwn.watch's public incident catalog for local matching. Context does not change package applicability or update commands. Tag-based incident leads require investigation; they are not confirmed vulnerabilities. See [optional security context](docs/USAGE.md#optional-security-context).
+This sends referenced CVE IDs to cve.now and downloads pwn.watch's public incident catalog and Cloudflare's Zero Wire RSS feed for local matching. Context does not change package applicability or update commands. Tag-based incident leads require investigation; they are not confirmed vulnerabilities. See [optional security context](docs/USAGE.md#optional-security-context).
 
 ### Read status and history
 
